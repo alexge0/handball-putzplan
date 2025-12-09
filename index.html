@@ -288,76 +288,74 @@
             
             return playerObjects.slice(0, count).map(p => p.stats);
         }
-// --- Helper für Anzeige im Ergebnis-Bereich ---
 
-function renderMessage(container, title, body, extraClasses = '') {
-    container.innerHTML = `
-        <div class="p-4 rounded-lg ${extraClasses}">
-            <h3 class="font-bold mb-1">${title}</h3>
-            <p class="text-sm">${body}</p>
-        </div>
-    `;
-}
-
-function renderPutzplan(container, cache) {
-    if (!cache || !cache.assignments || cache.assignments.length === 0) {
-        renderMessage(
-            container,
-            'Kein Ergebnis',
-            'Es wurden keine Zuweisungen gefunden.',
-            'bg-yellow-100 text-yellow-800'
-        );
-        return;
-    }
-
-    let html = '';
-
-    cache.assignments.forEach((a, idx) => {
-        const playersList = a.players.map(p => `• ${p}`).join('<br>');
-        html += `
-            <div class="p-4 mb-4 rounded-lg bg-green-50 text-green-800">
-                <h3 class="font-bold mb-1">${a.shiftName}</h3>
-                <p class="text-sm mb-2">
-                    <span class="font-semibold">Putzmaschine:</span> ${a.putzmaschine}
-                </p>
-                <p class="text-sm mb-1 font-semibold">Restliche Spieler:</p>
-                <p class="text-sm leading-snug">${playersList || '–'}</p>
-            </div>
-        `;
-    });
-
-    if (cache.freilos && cache.freilos.count > 0) {
-        const freilosText = cache.freilos.players.join(', ');
-        html += `
-            <div class="p-4 rounded-lg bg-blue-50 text-blue-800">
-                <h3 class="font-bold mb-1">Freilos</h3>
-                <p class="text-sm">
-                    ${cache.freilos.count} Spieler ohne Putzdienst:
-                    <span class="font-semibold">${freilosText}</span>
-                </p>
-            </div>
-        `;
-    }
-
-    container.innerHTML = html;
-
-    // --- WhatsApp-Text erzeugen ---
-    let waText = '*Putzplan*\n\n';
-    cache.assignments.forEach(a => {
-        waText += `*${a.shiftName}*\n`;
-        waText += `Putzmaschine: ${a.putzmaschine}\n`;
-        if (a.players.length > 0) {
-            waText += `Spieler: ${a.players.join(', ')}\n`;
+        // FÜGE DIE RENDERING HILFSFUNKTIONEN HIER EIN, DAMIT SIE IM GENERATOR VERFÜGBAR SIND
+        
+        /**
+         * Renders a simple message block.
+         */
+        function renderMessage(container, title, message, classes) {
+             container.innerHTML = `
+                <div class="p-4 rounded-lg ${classes} task-button">
+                    <h3 class="font-bold">${title}</h3>
+                    <p class="text-sm">${message}</p>
+                </div>
+            `;
+            document.getElementById('whatsapp-copy-container').classList.add('hidden');
         }
-        waText += '\n';
-    });
 
-    if (cache.freilos && cache.freilos.count > 0) {
-        waText += `Freilos: ${cache.freilos.players.join(', ')}\n`;
-    }
+        /**
+         * Renders the generated Putzplan to the UI.
+         */
+        function renderPutzplan(container, cache) {
+            let html = '<div class="space-y-6">';
+            let whatsappText = 'Putzplan - ' + new Date().toLocaleDateString('de-DE') + '\n\n';
+            
+            cache.assignments.forEach(assignment => {
+                const bgClass = assignment.shiftType === 'Früh' ? 'bg-blue-50' : 'bg-green-50';
+                
+                html += `
+                    <div class="p-4 rounded-xl shadow-md ${bgClass}">
+                        <h3 class="text-xl font-bold text-gray-800 border-b pb-2 mb-2">${assignment.shiftName} (${assignment.players.length + 1} Spieler)</h3>
+                        <p class="font-semibold text-lg text-indigo-700 mb-2">Putzmaschine: <span class="text-indigo-900">${assignment.putzmaschine}</span></p>
+                        <p class="text-gray-700 text-sm">Crew: ${assignment.players.join(', ')}</p>
+                    </div>
+                `;
 
-    renderWhatsappExport(waText);
-}
+                whatsappText += `${assignment.shiftName}:\n`;
+                whatsappText += ` Maschine: ${assignment.putzmaschine}\n`;
+                whatsappText += ` Crew: ${assignment.players.join(', ')}\n\n`;
+            });
+            
+            if (cache.freilos.players.length > 0) {
+                 html += `
+                    <div class="p-4 rounded-xl shadow-md bg-yellow-50">
+                        <h3 class="text-xl font-bold text-gray-800 border-b pb-2 mb-2">Freilos (${cache.freilos.count} Spieler)</h3>
+                        <p class="text-gray-700 text-sm">${cache.freilos.players.join(', ')}</p>
+                    </div>
+                `;
+                whatsappText += `Freilos:\n ${cache.freilos.players.join(', ')}\n`;
+
+            } else {
+                html += '<p class="p-4 bg-gray-100 rounded-lg text-sm text-gray-600">Keine Freilose verteilt.</p>';
+            }
+            
+            html += `
+                </div>
+                <div class="mt-6 border-t pt-4">
+                    <button onclick="window.saveAssignment()" class="w-full py-3 px-6 bg-green-600 text-white font-bold text-lg rounded-xl hover:bg-green-700 task-button">
+                        Putzplan Bestätigen & Statistiken Speichern
+                    </button>
+                    <p class="text-xs text-center text-gray-500 mt-2">Bestätigung speichert die Putzdienste und aktualisiert die Fairness-Zähler.</p>
+                </div>
+            `;
+            container.innerHTML = html;
+            
+            renderWhatsappExport(whatsappText);
+        }
+        
+        // --- Putzplan Generierungs Logik ---
+
         window.generatePutzplan = function() {
             const availablePlayers = Array.from(selectedPlayers);
             const variant = document.querySelector('input[name="variant"]:checked').value;
@@ -405,7 +403,7 @@ function renderPutzplan(container, cache) {
                     renderMessage(resultDiv, 'Zuweisungsfehler', 'Interner Fehler: Kann keinen Putzmaschinen-Spieler zuweisen.', 'bg-red-100 text-red-800');
                     return;
                 }
-                
+
                 const cleanCrewWithoutPM = candidatesNames.filter(name => name !== putzmaschinePlayerStats.name);
                 
                 assignments.push({
