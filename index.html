@@ -1,0 +1,749 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Handball Putzplan Generator</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; background-color: #f1f5f9; }
+        .container-card { background-color: white; border-radius: 1rem; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1); }
+        .toggle-switch { width: 44px; height: 24px; background-color: #ccc; border-radius: 9999px; position: relative; cursor: pointer; transition: background-color 0.3s; }
+        .toggle-switch.checked { background-color: #10b981; }
+        .toggle-switch::after { content: ''; position: absolute; width: 20px; height: 20px; border-radius: 50%; background-color: white; top: 2px; left: 2px; transition: transform 0.3s; }
+        .toggle-switch.checked::after { transform: translateX(20px); }
+        .checkbox-item { cursor: pointer; transition: background-color 0.1s; }
+        .checkbox-item:hover { background-color: #f8fafc; }
+        #whatsapp-output { resize: none; height: 150px; font-family: monospace; white-space: pre; overflow-wrap: normal; overflow-x: auto; }
+        .stat-badge { font-weight: bold; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; }
+    </style>
+    <!-- Firebase Imports for Cloud Persistence -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global state and configurations (will be populated via Firestore/Auth)
+        let db = null;
+        let playerStats = {};
+        let selectedPlayers = new Set();
+        let AppConfig = {};
+        let assignmentCache = null; 
+        let isAuthReady = false;
+        let userId = null;
+        
+        const PLAYERS_PER_UNIT = 7; // 6 Crew + 1 Putzmaschine
+        
+        const PLAYER_NAMES = [
+            "Alex", "Wüpping", "Fabian", "Baumi", "Fred", "Hannes", "Lauryn", "Marius",
+            "Marvin L.", "Matze", "Maurice", "Nico", "Niklas T.", "Niklas M.", "Pascal",
+            "Patrick", "Strooti", "Tim", "Tobi", "Viktor"
+        ];
+        
+        // Use a default project ID for local execution if the Canvas ID is not available
+        const APP_ID = typeof __app_id !== 'undefined' ? __app_id : 'handball-putzplan-2025';
+        const STATS_COLLECTION = "stats";
+        const CONFIG_DOC = "config";
+
+        setLogLevel('Debug');
+
+        // --- Firebase/Data Functions (Adapted for Cloud Persistence) ---
+        
+        function getPlayerDocRef(playerName) {
+            return doc(db, 
+                `artifacts/${APP_ID}/users/${userId}/${STATS_COLLECTION}`, 
+                playerName
+            );
+        }
+
+        function getConfigDocRef() {
+            return doc(db, 
+                `artifacts/${APP_ID}/users/${userId}/${CONFIG_DOC}`, 
+                CONFIG_DOC
+            );
+        }
+        
+        // Initialer Ladevorgang der Konfiguration
+        async function loadConfig() {
+            if (!db || !isAuthReady) return;
+            const docSnap = await getDoc(getConfigDocRef());
+            AppConfig = {
+                nextPutzmaschineType: 'Früh', // Default starting type
+                totalTrainings: 0,
+                ...(docSnap.exists() ? docSnap.data() : {})
+            };
+        }
+        
+        // Initialer Ladevorgang aller Spielerstatistiken
+        async function loadAllPlayerStats() {
+            const promises = PLAYER_NAMES.map(async name => {
+                const docSnap = await getDoc(getPlayerDocRef(name));
+                const defaultStats = getPlayerStatsTemplate(name);
+                playerStats[name] = { ...defaultStats, ...(docSnap.exists() ? docSnap.data() : {}) };
+            });
+            await Promise.all(promises);
+        }
+
+        function getPlayerStatsTemplate(name) {
+             return {
+                name: name,
+                freilosCount: 0,
+                putzmaschineFruehCount: 0,
+                putzmaschineSpaetCount: 0,
+                fruehPutzCount: 0,
+                spaetPutzCount: 0,
+                totalPutz: 0,
+                lastAssigned: 0, // Timestamp
+            };
+        }
+
+        async function updateConfig(updates) {
+            if (!db || !isAuthReady) return;
+            AppConfig = { ...AppConfig, ...updates };
+            const docRef = getConfigDocRef();
+            try {
+                await setDoc(docRef, AppConfig, { merge: true });
+            } catch (error) {
+                console.error("Fehler beim Speichern der Konfiguration:", error);
+            }
+        }
+        
+        async function initializeFirebase() {
+            try {
+                let firebaseConfig;
+                const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+                // 1. Priorität: Canvas Secrets (wenn vorhanden)
+                if (typeof __firebase_config !== 'undefined') {
+                    firebaseConfig = JSON.parse(__firebase_config);
+                } else {
+                    // *************************************************************************
+                    // * WICHTIG: CLOUD-KONFIGURATION START (MUSS ANGEPASST WERDEN) *
+                    // *************************************************************************
+                    // Diese Werte wurden durch die tatsächlichen Schlüssel des Users ersetzt:
+                    firebaseConfig = {
+                        apiKey: "AIzaSyDwMmGXsyG_KOM_QGUZJmGVNqq1P0VBtXk", 
+                        authDomain: "handball-putzplan.firebaseapp.com",
+                        projectId: "handball-putzplan",
+                        // Fügen Sie hier alle weiteren Konfigurationsfelder hinzu, falls benötigt (z.B. storageBucket, appId)
+                    };
+                    // *************************************************************************
+                    // * CLOUD-KONFIGURATION ENDE *
+                    // *************************************************************************
+                    
+                    // Zusätzliche Prüfung: Wenn die Fallback-Werte noch Platzhalter sind, FEHLSCHLAGEN lassen.
+                    if (firebaseConfig.apiKey === "IHRE_FIREBASE_API_KEY_HIER_EINFÜGEN") {
+                         document.getElementById('loading-message').textContent = 'FEHLER: BITTE DIE PLATZHALTER-SCHLÜSSEL IM CODE ERSETZEN!';
+                         return; // Stoppt den weiteren Initialisierungsprozess
+                    }
+                }
+
+                const firebaseApp = initializeApp(firebaseConfig);
+                db = getFirestore(firebaseApp);
+                const auth = getAuth(firebaseApp);
+
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    // Verwende signInAnonymously, wenn kein Token verfügbar ist (normal für public hosting)
+                    await signInAnonymously(auth);
+                }
+
+                userId = auth.currentUser?.uid || 'anonymous';
+                isAuthReady = true;
+
+                // Lade Daten synchron, bevor das UI gerendert wird
+                await loadConfig();
+                await loadAllPlayerStats();
+                
+                document.getElementById('loading-message').textContent = 'Daten geladen.';
+                document.getElementById('loading-container').classList.add('hidden'); 
+                
+                renderPlayerList();
+                updateShiftInfo();
+            } catch (error) {
+                console.error("Fehler bei der Firebase-Initialisierung:", error);
+                document.getElementById('loading-message').textContent = 'Kritischer Fehler beim Starten. Siehe Konsole.';
+            }
+        }
+
+
+        // --- Core Utility Functions ---
+
+        function getWeekNumber(d = new Date()) {
+            d = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+            d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
+            const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+            const weekNo = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+            return weekNo;
+        }
+
+        function getPlayerStats(name) {
+            return playerStats[name] || getPlayerStatsTemplate(name);
+        }
+        
+        function updateShiftInfo() {
+            const kw = getWeekNumber();
+            const isEven = kw % 2 === 0;
+            const donnerstagSchicht = isEven ? 'Früh' : 'Spät';
+            const totalTrainings = AppConfig.totalTrainings || 0;
+            
+            document.getElementById('shift-info').innerHTML = `
+                Aktuelle KW: <span class="font-bold">${kw}</span> (${isEven ? 'Gerade' : 'Ungerade'}). 
+                Donnerstags-Schicht: <span class="font-bold">${donnerstagSchicht}</span>. 
+                Gesamte Trainings gezählt: <span class="font-bold">${totalTrainings}</span>
+            `;
+        }
+        
+        // --- Rendering and Player Selection ---
+
+        function renderPlayerList() {
+            const listElement = document.getElementById('player-list');
+            listElement.innerHTML = '';
+            
+            const totalTrainings = AppConfig.totalTrainings || 0;
+            
+            const sortedPlayers = PLAYER_NAMES.map(name => {
+                const stats = getPlayerStats(name);
+                const attendance = totalTrainings > 0 ? (stats.totalPutz / totalTrainings) * 100 : 0;
+                return { 
+                    ...stats, 
+                    attendance_percent: attendance.toFixed(1),
+                    absence_rate: (100 - attendance).toFixed(1)
+                };
+            }).sort((a, b) => a.name.localeCompare(b.name));
+
+            sortedPlayers.forEach(player => {
+                const isSelected = selectedPlayers.has(player.name);
+
+                const listItem = document.createElement('li');
+                listItem.className = 'flex items-center justify-between p-2 rounded-lg checkbox-item';
+                listItem.setAttribute('data-name', player.name);
+                listItem.onclick = () => window.togglePlayer(player.name); 
+
+                // ANPASSUNG: Nur Name und Gesamtputzdienste anzeigen
+                listItem.innerHTML = `
+                    <div class="flex flex-col">
+                         <span class="font-medium text-gray-800">${player.name}</span>
+                         <div class="text-xs text-gray-500 mt-1">
+                            <span>Gesamtdienste: ${player.totalPutz}</span>
+                         </div>
+                    </div>
+                    <div class="toggle-switch ${isSelected ? 'checked' : ''}"></div>
+                `;
+                listElement.appendChild(listItem);
+            });
+            updateUserCountInfo();
+        }
+
+        window.togglePlayer = function(name) {
+            if (selectedPlayers.has(name)) {
+                selectedPlayers.delete(name);
+            } else {
+                selectedPlayers.add(name);
+            }
+            renderPlayerList();
+        }
+        
+        window.addNewPlayer = async function() {
+            const nameInput = document.getElementById('new-player-name');
+            const playerName = nameInput.value.trim();
+            const messageDiv = document.getElementById('add-player-message');
+            
+            if (!playerName || PLAYER_NAMES.includes(playerName)) {
+                messageDiv.textContent = "Ungültiger Name oder Spieler existiert bereits.";
+                messageDiv.className = "text-red-500 mt-2 text-sm";
+                return;
+            }
+            
+            // Hinzufügen zum Arbeitsspeicher (temporär)
+            PLAYER_NAMES.push(playerName); 
+            playerStats[playerName] = getPlayerStatsTemplate(playerName);
+            selectedPlayers.add(playerName);
+            renderPlayerList();
+            
+            messageDiv.textContent = `Spieler '${playerName}' hinzugefügt. (ACHTUNG: Muss im Quellcode für dauerhafte Speicherung hinzugefügt werden.)`;
+            messageDiv.className = "text-green-500 mt-2 text-sm";
+            nameInput.value = '';
+        }
+
+        // --- Fairness Logic ---
+
+        function selectPlayersByFairness(playerNames, count, metricGetter) {
+            const playerObjects = playerNames.map(name => ({
+                name,
+                stats: getPlayerStats(name),
+                metric: metricGetter(getPlayerStats(name))
+            }));
+            
+            playerObjects.sort((a, b) => {
+                if (a.metric !== b.metric) return a.metric - b.metric;
+                if (a.stats.lastAssigned !== b.stats.lastAssigned) return a.stats.lastAssigned - b.stats.lastAssigned;
+                return a.name.localeCompare(b.name);
+            });
+            
+            return playerObjects.slice(0, count).map(p => p.stats);
+        }
+
+        window.generatePutzplan = function() {
+            const availablePlayers = Array.from(selectedPlayers);
+            const variant = document.querySelector('input[name="variant"]:checked').value;
+            const resultDiv = document.getElementById('putzplan-result');
+            resultDiv.innerHTML = '';
+            document.getElementById('whatsapp-copy-container').classList.add('hidden');
+            assignmentCache = null; 
+
+            if (availablePlayers.length < 1) {
+                renderMessage(resultDiv, 'Keine Spieler ausgewählt.', 'Bitte wählen Sie mindestens einen Spieler aus.', 'bg-red-100 text-red-800');
+                return;
+            }
+            
+            let assignments = [];
+            let currentPool = [...availablePlayers]; 
+            
+            
+            if (variant === '1') {
+                // Variante 1: Eine Einheit (7 Spieler benötigt)
+                const playersToAssign = Math.min(availablePlayers.length, PLAYERS_PER_UNIT);
+                
+                // 1. Fair Selection based on minimal TOTAL cleanings
+                let candidatesStats = selectPlayersByFairness(currentPool, playersToAssign, (p) => p.totalPutz);
+                let candidatesNames = candidatesStats.map(s => s.name);
+
+                // 2. Determine Freilos
+                const freilosNames = currentPool.filter(name => !candidatesNames.includes(name));
+                
+                // 3. Putzmaschine Rotation (Früh/Spät)
+                const pmType = AppConfig.nextPutzmaschineType || 'Früh';
+                const pmKey = pmType === 'Früh' ? 'putzmaschineFruehCount' : 'putzmaschineSpaetCount';
+                
+                // --- Putzmaschinen Auswahl ---
+                const pmSelectionResult = selectPlayersByFairness(candidatesNames, 1, (p) => p[pmKey]);
+                
+                let putzmaschinePlayerStats;
+                
+                if (pmSelectionResult.length > 0) {
+                    putzmaschinePlayerStats = pmSelectionResult[0];
+                } else if (candidatesStats.length > 0) {
+                     // Fallback: Wenn Fairness-Auswahl keinen Unterschied macht, nimm den ersten
+                    putzmaschinePlayerStats = candidatesStats[0];
+                } else {
+                    // Sollte nicht passieren, wenn playersToAssign >= 1
+                    renderMessage(resultDiv, 'Zuweisungsfehler', 'Interner Fehler: Kann keinen Putzmaschinen-Spieler zuweisen.', 'bg-red-100 text-red-800');
+                    return;
+                }
+                
+                const cleanCrewWithoutPM = candidatesNames.filter(name => name !== putzmaschinePlayerStats.name);
+                
+                assignments.push({
+                    shiftName: `Putzdienst (eine Hälfte / Schicht ${pmType})`,
+                    shiftType: pmType,
+                    players: cleanCrewWithoutPM, 
+                    putzmaschine: putzmaschinePlayerStats.name, 
+                });
+                
+                assignmentCache = {
+                    assignments: assignments,
+                    freilos: { players: freilosNames, count: freilosNames.length },
+                    nextPutzmaschineType: AppConfig.nextPutzmaschineType === 'Früh' ? 'Spät' : 'Früh' // Toggle for next time
+                };
+
+            } else if (variant === '2') {
+                // Variante 2: Zwei Einheiten (14 Spieler benötigt)
+                const totalNeeded = 2 * PLAYERS_PER_UNIT; // 14 Spieler
+                const playersToAssign = Math.min(availablePlayers.length, totalNeeded);
+
+                if (playersToAssign < 2) {
+                     renderMessage(resultDiv, 'Zu wenig Spieler!', `Sie benötigen mindestens 2 Spieler für 2 Hälften, haben aber weniger als 2 ausgewählt.`, 'bg-red-100 text-red-800');
+                    return;
+                }
+                
+                // 1. Gesamt-Kandidaten werden nach minimalen Putzdiensten gesamt ausgewählt
+                const allCandidatesStats = selectPlayersByFairness(availablePlayers, playersToAssign, (p) => p.totalPutz);
+                let availableForShifts = allCandidatesStats.map(s => s.name); 
+                
+                // 2. Determine Freilos 
+                const freilosNames = availablePlayers.filter(name => !availableForShifts.includes(name));
+                
+                // 3. Bestimme die Anzahl der Spieler pro Schicht (gleichmäßig)
+                const sizePerShift = Math.floor(availableForShifts.length / 2);
+                const remainder = availableForShifts.length % 2; 
+
+                const shift1Type = 'Früh';
+                const shift2Type = 'Spät';
+
+                // --- Shift 1: Früh ---
+                const shift1Key = 'fruehPutzCount';
+                const pm1Key = 'putzmaschineFruehCount';
+                const shift1Size = sizePerShift + remainder;
+
+                // Select crew for shift 1 based on minimal 'Früh' count
+                const shift1CrewStats = selectPlayersByFairness(availableForShifts, shift1Size, (p) => p[shift1Key]);
+                const shift1CrewNames = shift1CrewStats.map(s => s.name);
+                
+                // Spieler, die NICHT in Schicht 1 sind (für Schicht 2 verfügbar)
+                let remainingForShift2 = availableForShifts.filter(name => !shift1CrewNames.includes(name));
+                
+                // Select Putzmaschine 1
+                const pm1SelectionResult = selectPlayersByFairness(shift1CrewNames, 1, (p) => p[pm1Key]);
+                let putzmaschine1PlayerStats = pm1SelectionResult.length > 0 ? pm1SelectionResult[0] : getPlayerStats(shift1CrewNames[0]);
+                
+                const shift1PlayersWithoutPM = shift1CrewNames.filter(name => name !== putzmaschine1PlayerStats.name);
+
+                assignments.push({
+                    shiftName: `Schicht 1 (${shift1Type})`,
+                    shiftType: shift1Type,
+                    players: shift1PlayersWithoutPM,
+                    putzmaschine: putzmaschine1PlayerStats.name,
+                });
+
+                // --- Shift 2: Spät ---
+                if (remainingForShift2.length > 0) {
+                    const shift2Key = 'spaetPutzCount';
+                    const pm2Key = 'putzmaschineSpaetCount';
+                    
+                    // Die restlichen Spieler sind die Shift 2 Crew
+                    const shift2CrewNames = remainingForShift2;
+
+                    // Select Putzmaschine 2
+                    const pm2SelectionResult = selectPlayersByFairness(shift2CrewNames, 1, (p) => p[pm2Key]);
+                    let putzmaschine2PlayerStats = pm2SelectionResult.length > 0 ? pm2SelectionResult[0] : getPlayerStats(shift2CrewNames[0]);
+                    
+                    const shift2PlayersWithoutPM = shift2CrewNames.filter(name => name !== putzmaschine2PlayerStats.name);
+
+                    assignments.push({
+                        shiftName: `Schicht 2 (${shift2Type})`,
+                        shiftType: shift2Type,
+                        players: shift2PlayersWithoutPM,
+                        putzmaschine: putzmaschine2PlayerStats.name,
+                    });
+                }
+                
+                assignmentCache = {
+                    assignments: assignments,
+                    freilos: { players: freilosNames, count: freilosNames.length },
+                    nextPutzmaschineType: AppConfig.nextPutzmaschineType 
+                };
+            }
+            
+            renderPutzplan(resultDiv, assignmentCache);
+        }
+
+        window.saveAssignment = async function() {
+            if (!assignmentCache || !db) {
+                 renderMessage(document.getElementById('putzplan-result'), 
+                              'Fehler', 
+                              'Kann Statistiken nicht speichern (Datenbank nicht bereit oder Putzplan fehlt).', 
+                              'bg-red-100 text-red-800');
+                return;
+            }
+            
+            const now = Date.now();
+            AppConfig.totalTrainings += 1;
+            
+            await updateConfig({ totalTrainings: AppConfig.totalTrainings, nextPutzmaschineType: assignmentCache.nextPutzmaschineType });
+
+            // 1. Process Assignments (Cleaning & Putzmaschine)
+            const promises = [];
+            
+            assignmentCache.assignments.forEach(assignment => {
+                const shiftKey = assignment.shiftType === 'Früh' ? 'fruehPutzCount' : 'spaetPutzCount';
+                const pmKey = assignment.shiftType === 'Früh' ? 'putzmaschineFruehCount' : 'putzmaschineSpaetCount';
+                
+                const allAssigned = assignment.players.concat(assignment.putzmaschine);
+
+                allAssigned.forEach(name => {
+                    const stats = getPlayerStats(name);
+                    const isPM = name === assignment.putzmaschine;
+                    
+                    const updates = {
+                        totalPutz: (stats.totalPutz || 0) + 1,
+                        lastAssigned: now,
+                        [shiftKey]: (stats[shiftKey] || 0) + 1
+                    };
+                    if (isPM) {
+                        updates[pmKey] = (stats[pmKey] || 0) + 1;
+                    }
+                    
+                    promises.push(setDoc(getPlayerDocRef(name), updates, { merge: true }));
+                });
+            });
+
+            // 2. Process Freilos
+            assignmentCache.freilos.players.forEach(name => {
+                 promises.push(setDoc(getPlayerDocRef(name), { freilosCount: getPlayerStats(name).freilosCount + 1, lastAssigned: now }, { merge: true }));
+            });
+            
+            try {
+                await Promise.all(promises);
+                document.getElementById('putzplan-result').innerHTML = `
+                    <div class="p-4 rounded-lg bg-green-100 text-green-800 task-button">
+                        <h3 class="font-bold">Erfolgreich gespeichert!</h3>
+                        <p class="text-sm">Die Statistiken wurden in der Cloud aktualisiert.</p>
+                    </div>
+                `;
+                assignmentCache = null;
+                // Lade Daten neu, um die UI zu aktualisieren
+                await loadAllPlayerStats(); 
+                renderPlayerList();
+                updateShiftInfo();
+            } catch (e) {
+                console.error("Speicherfehler:", e);
+                renderMessage(document.getElementById('putzplan-result'), 'Speicherfehler', 'Fehler beim Speichern in der Cloud-Datenbank.', 'bg-red-100 text-red-800');
+            }
+        }
+        
+        // --- Rendering, Modal and Reset Functions ---
+
+        function renderWhatsappExport(text) {
+            const container = document.getElementById('whatsapp-copy-container');
+            container.innerHTML = `
+                <div class="mt-8 pt-4 border-t border-gray-200">
+                    <h3 class="text-xl font-semibold text-gray-800 mb-3">Zum Kopieren (WhatsApp-Format)</h3>
+                    <textarea id="whatsapp-output" class="w-full p-3 border border-gray-300 rounded-lg bg-gray-50 text-sm" readonly>${text}</textarea>
+                    <button onclick="window.copyToClipboard('whatsapp-output')" class="mt-2 w-full py-2 bg-indigo-500 text-white font-medium rounded-lg hover:bg-indigo-600">
+                        In die Zwischenablage kopieren
+                    </button>
+                    <p id="copy-status" class="text-xs text-gray-500 mt-2 hidden">Kopiert!</p>
+                </div>
+            `;
+            container.classList.remove('hidden');
+        }
+
+        window.copyToClipboard = function(elementId) {
+            const copyText = document.getElementById(elementId);
+            copyText.select();
+            document.execCommand('copy');
+            
+            const status = document.getElementById('copy-status');
+            status.textContent = 'Ergebnis erfolgreich in die Zwischenablage kopiert!';
+            status.classList.remove('hidden');
+            setTimeout(() => status.classList.add('hidden'), 3000);
+        }
+        
+        // Funktionen für Modals und Reset
+        window.toggleStatsModal = function() {
+            const modal = document.getElementById('stats-modal');
+            modal.classList.toggle('hidden');
+            if (!modal.classList.contains('hidden')) {
+                const tableBody = document.getElementById('stats-table-body');
+                tableBody.innerHTML = ''; // Leere alte Einträge
+                
+                const totalTrainings = AppConfig.totalTrainings || 0;
+                
+                PLAYER_NAMES.map(name => {
+                    const stats = getPlayerStats(name);
+                    const attendance = totalTrainings > 0 ? (stats.totalPutz / totalTrainings) * 100 : 0;
+                    const absence = 100 - attendance;
+                    
+                    const row = document.createElement('tr');
+                    row.className = 'hover:bg-gray-50';
+                    
+                    row.innerHTML = `
+                        <td class="px-3 py-2 whitespace-nowrap text-sm font-medium text-gray-900">${stats.name}</td>
+                        <td class="px-3 py-2 whitespace-nowrap text-sm text-gray-500 text-center">${attendance.toFixed(1)}%</td>
+                        <td class="px-3 py-2 whitespace-nowrap text-sm text-gray-500 text-center">${absence.toFixed(1)}%</td>
+                        <td class="px-3 py-2 whitespace-nowrap text-sm text-gray-500 text-center">${stats.putzmaschineFruehCount}</td>
+                        <td class="px-3 py-2 whitespace-nowrap text-sm text-gray-500 text-center">${stats.putzmaschineSpaetCount}</td>
+                        <td class="px-3 py-2 whitespace-nowrap text-sm text-gray-500 text-center">${stats.fruehPutzCount}</td>
+                        <td class="px-3 py-2 whitespace-nowrap text-sm text-gray-500 text-center">${stats.spaetPutzCount}</td>
+                        <td class="px-3 py-2 whitespace-nowrap text-sm text-gray-500 text-center">${stats.freilosCount}</td>
+                        <td class="px-3 py-2 whitespace-nowrap text-sm font-bold text-gray-700 text-center">${stats.totalPutz}</td>
+                    `;
+                    tableBody.appendChild(row);
+                });
+            }
+        }
+
+        window.toggleResetModal = function() {
+            document.getElementById('reset-modal').classList.toggle('hidden');
+        }
+
+        window.resetAllStats = async function() {
+            if (!db) {
+                 window.toggleResetModal();
+                 alert('Fehler: Cloud-Datenbank ist nicht verbunden. Löschen nicht möglich.');
+                 return;
+            }
+            
+            const promises = [];
+            
+            // 1. Konfiguration zurücksetzen
+            promises.push(updateConfig({ nextPutzmaschineType: 'Früh', totalTrainings: 0 }));
+
+            // 2. Alle Spielerstatistiken löschen/zurücksetzen
+            PLAYER_NAMES.forEach(name => {
+                promises.push(setDoc(getPlayerDocRef(name), getPlayerStatsTemplate(name)));
+            });
+
+            try {
+                await Promise.all(promises);
+                window.toggleResetModal(); 
+                document.getElementById('putzplan-result').innerHTML = `
+                    <div class="p-4 rounded-lg bg-red-100 text-red-800 task-button">
+                        <h3 class="font-bold">Statistiken gelöscht!</h3>
+                        <p class="text-sm">Alle Cloud-Daten wurden auf Null zurückgesetzt.</p>
+                    </div>
+                `;
+                // App neu initialisieren
+                await loadConfig();
+                await loadAllPlayerStats();
+                renderPlayerList();
+                updateShiftInfo();
+            } catch (e) {
+                 window.toggleResetModal();
+                 alert('Kritischer Fehler beim Löschen der Cloud-Daten.');
+                 console.error("Reset Fehler:", e);
+            }
+        }
+        
+        function updateUserCountInfo() {
+            const count = selectedPlayers.size;
+            const element = document.getElementById('user-count-info');
+            element.classList.remove('hidden');
+            element.innerHTML = `Aktuell ausgewählte Spieler: <span class="font-bold">${count}</span>`;
+        }
+
+        window.addEventListener('load', initializeFirebase);
+
+    </script>
+</head>
+<body class="p-4 sm:p-8 min-h-screen">
+
+    <div id="loading-container" class="fixed inset-0 bg-gray-50 flex items-center justify-center z-50">
+        <p id="loading-message" class="text-xl font-semibold text-indigo-600">App wird initialisiert und Statistiken aus der Cloud geladen...</p>
+    </div>
+
+    <div class="max-w-4xl mx-auto space-y-8">
+        <header class="text-center">
+            <h1 class="text-3xl sm:text-4xl font-extrabold text-gray-900 mb-2">Handball Putzplan Generator</h1>
+            <p class="text-lg text-gray-600">Cloud-basierte Rotation & Statistiken</p>
+            <!-- Info Header (KW & Donnerstagsschicht) -->
+            <div id="shift-info" class="mt-4 p-3 bg-indigo-100 text-indigo-800 rounded-lg text-sm font-medium"></div>
+        </header>
+
+        <!-- Main Content Grid -->
+        <main class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+            <!-- Player Selection (Left Column) -->
+            <div class="lg:col-span-1 container-card p-6">
+                <h2 class="text-2xl font-semibold text-gray-800 mb-4 border-b pb-2">Spieler Anwesenheit & Statistik</h2>
+                <div class="h-80 overflow-y-auto pr-2 mb-4">
+                    <ul id="player-list" class="space-y-1">
+                        <!-- Player list rendered here -->
+                    </ul>
+                </div>
+                
+                <!-- Spieler hinzufügen (Funktionell, aber Neustart der App für dauerhafte Speicherung im Code nötig) -->
+                <div class="mt-4 pt-4 border-t border-gray-200">
+                    <h3 class="text-lg font-semibold mb-2">Spieler Hinzufügen (temporär):</h3>
+                    <div class="flex space-x-2">
+                        <input type="text" id="new-player-name" placeholder="Neuer Spielername" class="flex-grow p-2 border border-gray-300 rounded-lg">
+                        <button onclick="window.addNewPlayer()" class="py-2 px-4 bg-indigo-500 text-white font-medium rounded-lg hover:bg-indigo-600">
+                            + Add
+                        </button>
+                    </div>
+                    <p id="add-player-message"></p>
+                </div>
+            </div>
+
+            <!-- Configuration and Generation (Middle Column) -->
+            <div class="lg:col-span-1 container-card p-6 flex flex-col justify-between">
+                <div class="space-y-6">
+                    <!-- Variant Selection (7er Einheiten) -->
+                    <div>
+                        <h2 class="text-2xl font-semibold text-gray-800 mb-4 border-b pb-2">Putz-Variante wählen</h2>
+                        <p class="text-sm text-gray-600 mb-3">Jede Einheit benötigt 7 Spieler. Die App weist alle verfügbaren Spieler zu, falls weniger als benötigt anwesend sind.</p>
+                        <div class="space-y-3">
+                            <label id="variant-1-label" class="flex items-center space-x-3 bg-blue-50 p-3 rounded-lg task-button">
+                                <input id="variant-1-radio" type="radio" name="variant" value="1" checked class="form-radio text-indigo-600 h-4 w-4">
+                                <span class="font-medium text-gray-700">Variante 1: Nur eine Hälfte putzen (7 Spieler benötigt)</span>
+                            </label>
+                            <label id="variant-2-label" class="flex items-center space-x-3 bg-blue-50 p-3 rounded-lg task-button">
+                                <input id="variant-2-radio" type="radio" name="variant" value="2" class="form-radio text-indigo-600 h-4 w-4">
+                                <span class="font-medium text-gray-700">Variante 2: Zwei Hälften putzen (14 Spieler benötigt)</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div id="user-count-info" class="p-3 bg-yellow-100 text-yellow-800 rounded-lg text-sm font-medium hidden"></div>
+                </div>
+                
+                <button onclick="window.generatePutzplan()" class="mt-6 w-full py-3 px-6 bg-indigo-600 text-white font-bold text-lg rounded-xl hover:bg-indigo-700 task-button">
+                    Putzplan Generieren
+                </button>
+            </div>
+
+            <!-- Result (Right Column) -->
+            <div class="lg:col-span-1 container-card p-6">
+                <h2 class="text-2xl font-semibold text-gray-800 mb-4 border-b pb-2">Ergebnis & Bestätigung</h2>
+                <div id="putzplan-result" class="space-y-4">
+                    <p class="text-gray-500">Klicken Sie auf "Putzplan Generieren", um die faire Einteilung zu sehen.</p>
+                </div>
+                <!-- WhatsApp Export Output Section -->
+                <div id="whatsapp-copy-container" class="mt-4 hidden"></div>
+            </div>
+        </main>
+        
+        <!-- Stats and Reset Buttons -->
+        <div class="flex justify-center space-x-4 mt-8">
+            <button onclick="window.toggleStatsModal()" class="text-indigo-600 hover:text-indigo-800 font-medium text-sm p-2 rounded-lg bg-white shadow-md task-button">
+                Saison-Statistiken anzeigen
+            </button>
+             <button onclick="window.toggleResetModal()" class="text-red-600 hover:text-red-800 font-medium text-sm p-2 rounded-lg bg-white shadow-md task-button">
+                Statistiken zurücksetzen (Saisonende)
+            </button>
+        </div>
+    </div>
+    
+    <!-- Stats Modal (Hidden by default) -->
+    <div id="stats-modal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-75 z-50 flex items-center justify-center p-4">
+        <div class="container-card w-full max-w-5xl p-6 relative">
+            <h2 class="text-2xl font-bold text-gray-800 mb-4">Saison-Statistiken (Fairness-Zähler)</h2>
+            <button onclick="window.toggleStatsModal()" class="absolute top-4 right-4 text-gray-500 hover:text-gray-800">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+            </button>
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead class="bg-gray-50">
+                        <tr>
+                            <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Spieler</th>
+                            <th class="px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Anw. %</th>
+                            <th class="px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Fehlq.</th>
+                            <th class="px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">PM Früh</th>
+                            <th class="px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">PM Spät</th>
+                            <th class="px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Früh gep.</th>
+                            <th class="px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Spät gep.</th>
+                            <th class="px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Freilos</th>
+                            <th class="px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">Gesamt</th>
+                        </tr>
+                    </thead>
+                    <tbody id="stats-table-body" class="bg-white divide-y divide-gray-200">
+                        <!-- Stats rows injected here -->
+                    </tbody>
+                </table>
+            </div>
+            <p class="text-xs text-gray-500 mt-4">Diese Zähler dienen dem Fairness-Algorithmus und werden nach jeder Putzplan-Bestätigung aktualisiert.</p>
+        </div>
+    </div>
+
+    <!-- Reset Confirmation Modal (Hidden by default) -->
+    <div id="reset-modal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-75 z-50 flex items-center justify-center p-4">
+        <div class="container-card w-full max-w-md p-6 relative text-center">
+            <h2 class="text-xl font-bold text-red-600 mb-3">ACHTUNG: Statistiken wirklich löschen?</h2>
+            <p class="text-gray-700 mb-6">Sind Sie sicher, dass Sie *alle* Putz-Statistiken unwiderruflich löschen möchten? Dies startet die Fairness-Rotation von Neuem.</p>
+            <div class="flex justify-center space-x-4">
+                <button onclick="window.toggleResetModal()" class="py-2 px-4 bg-gray-300 text-gray-800 font-medium rounded-lg hover:bg-gray-400">
+                    Abbrechen
+                </button>
+                <button onclick="window.resetAllStats()" class="py-2 px-4 bg-red-600 text-white font-medium rounded-lg hover:bg-red-700">
+                    JA, Statistiken unwiderruflich löschen
+                </button>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
