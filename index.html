@@ -1,7 +1,7 @@
 <!-- 
     HANDBALL PUTZPLAN GENERATOR
-    Version: 1.2
-    Features: Cloud-Sync (Firebase), Dynamische 7er-Teams, CSV-Export, Editor-Modus
+    Version: 1.3
+    Features: Cloud-Sync (Firebase), Dynamische 7er-Teams, CSV-Export, Editor-Modus, Bugfixes (Rendering)
 -->
 <!DOCTYPE html>
 <html lang="de">
@@ -71,7 +71,7 @@
         let userId = null;
         
         // --- VERSION CONFIGURATION ---
-        const APP_VERSION = "1.2"; 
+        const APP_VERSION = "1.3"; 
         
         const PLAYERS_PER_UNIT = 7; // 6 Crew + 1 Putzmaschine
         
@@ -187,11 +187,14 @@
                 document.getElementById('loading-message').textContent = 'Daten geladen.';
                 document.getElementById('loading-container').classList.add('hidden'); 
                 
-                // Version anzeigen
-                document.getElementById('app-version').textContent = `v${APP_VERSION}`;
-
+                // WICHTIG: Erst rendern, dann optionale UI-Elemente updaten
                 renderPlayerList();
                 updateShiftInfo();
+                
+                // Version anzeigen (mit Prüfung, falls Element fehlt)
+                const versionEl = document.getElementById('app-version');
+                if(versionEl) versionEl.textContent = `v${APP_VERSION}`;
+
             } catch (error) {
                 console.error("Fehler bei der Firebase-Initialisierung:", error);
                 document.getElementById('loading-message').textContent = 'Kritischer Fehler beim Starten. Siehe Konsole.';
@@ -979,7 +982,7 @@
     </div>
     
     <footer class="text-center text-gray-400 text-xs mt-12 mb-4">
-        Version 1.2 • Cloud Sync Active
+        <span id="app-version">Version 1.3</span> • Cloud Sync Active
     </footer>
 </body>
 </html>
