@@ -371,10 +371,8 @@
             const listElement = document.getElementById('player-list');
             listElement.innerHTML = '';
             
-            if (selectedPlayers.size === 0 && PLAYER_NAMES.length > 0) {
-                PLAYER_NAMES.forEach(name => selectedPlayers.add(name));
-            }
-
+            // Keine automatische Auswahl - Spieler starten mit Haken AUS
+            
             const totalTrainings = AppConfig.totalTrainings || 0;
             
             const sortedPlayers = PLAYER_NAMES.map(name => {
@@ -497,8 +495,8 @@
                 `;
 
                 whatsappText += `*${assignment.shiftName}*\n`;
-                whatsappText += `🔧 Maschine: ${assignment.putzmaschine}\n`;
-                whatsappText += `👥 Crew: ${assignment.players.join(', ')}\n\n`;
+                whatsappText += `Maschine: ${assignment.putzmaschine}\n`;
+                whatsappText += `Crew: ${assignment.players.join(', ')}\n\n`;
             });
             
             if (cache.freilos.players.length > 0) {
@@ -511,7 +509,7 @@
                         <p class="text-xs text-gray-500 mt-1">Diese Spieler waren anwesend, müssen aber nicht putzen.</p>
                     </div>
                 `;
-                whatsappText += `🎫 *Freilos:*\n${cache.freilos.players.join(', ')}\n`;
+                whatsappText += `*Freilos:*\n${cache.freilos.players.join(', ')}\n`;
             }
             
             html += `
