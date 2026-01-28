@@ -1,19 +1,22 @@
 <!-- 
     HANDBALL PUTZPLAN GENERATOR
-    Version: 1.4
-    Features: Cloud-Sync (Firebase), Dynamische 7er-Teams, CSV-Export, Editor-Modus
-    Changes: Removed visible version number in footer to prevent rendering errors
+    Version: 2.0
+    Features: 
+    - NEUER Multi-Kriterien-Fairness-Score
+    - Anwesenheit vs. Freilos getrennt (attendanceCount)
+    - Schicht-spezifische Optimierung
+    - Globale Putzmaschinen-Auswahl
+    - Automatische Datenmigration von v1.4
+    - Cloud-Sync (Firebase), Dynamische 7er-Teams, CSV-Export, Editor-Modus
 -->
 <!DOCTYPE html>
 <html lang="de">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Handball Putzplan Generator</title>
-    <!-- Tailwind CSS CDN -->
+    <title>Handball Putzplan Generator v2.0</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        /* Custom styles */
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
         body { font-family: 'Inter', sans-serif; background-color: #f1f5f9; }
         .container-card { background-color: white; border-radius: 1rem; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1); }
@@ -26,25 +29,22 @@
         #whatsapp-output { resize: none; height: 150px; font-family: monospace; white-space: pre; overflow-wrap: normal; overflow-x: auto; }
         .stat-badge { font-weight: bold; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; }
         
-        /* Centered Modals & Scrolling Fix */
         .modal-container {
             display: flex;
             align-items: center;
             justify-content: center;
             padding: 1rem;
         }
-        /* Diese Klasse macht den Inhalt der Modal-Karte scrollbar, wenn er zu hoch ist */
         .modal-scrollable-content {
-            max-height: 85vh; /* Maximal 85% der Bildschirmhöhe */
-            overflow-y: auto; /* Vertikales Scrollen aktivieren */
+            max-height: 85vh;
+            overflow-y: auto;
             width: 100%;
         }
 
-        /* Statistics Card Grid */
         #stats-card-container {
             display: grid;
             gap: 1rem;
-            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); /* Etwas schmaler für Mobile */
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
         }
         .player-stat-card {
             cursor: pointer;
@@ -54,15 +54,36 @@
             transform: translateY(-2px);
             box-shadow: 0 8px 15px -3px rgba(0, 0, 0, 0.15);
         }
+        
+        /* Fairness Score Visualisierung */
+        .fairness-bar {
+            height: 6px;
+            border-radius: 3px;
+            background: linear-gradient(to right, #10b981 0%, #fbbf24 50%, #ef4444 100%);
+        }
+        .fairness-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            border: 2px solid white;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+            transform: translateX(-50%);
+        }
+        
+        /* Balance-Anzeige */
+        .balance-good { color: #10b981; }
+        .balance-ok { color: #f59e0b; }
+        .balance-bad { color: #ef4444; }
     </style>
-    <!-- Firebase Imports for Cloud Persistence -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, onSnapshot, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, doc, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // Global state and configurations (will be populated via Firestore/Auth)
+        // ==========================================
+        // GLOBALE KONFIGURATION
+        // ==========================================
+        
         let db = null;
         let playerStats = {};
         let selectedPlayers = new Set();
@@ -79,70 +100,95 @@
             "Patrick", "Strooti", "Tim", "Tobi", "Viktor"
         ];
         
-        // Use a default project ID for local execution if the Canvas ID is not available
         const APP_ID = typeof __app_id !== 'undefined' ? __app_id : 'handball-putzplan-2025';
         const STATS_COLLECTION = "stats";
         const CONFIG_DOC = "config";
 
-        setLogLevel('Debug');
-
-        // --- Firebase/Data Functions (Adapted for Cloud Persistence) ---
+        // ==========================================
+        // FAIRNESS-GEWICHTUNG (anpassbar!)
+        // ==========================================
         
-        // WICHTIG: Pfade wurden auf 'public' geändert, damit alle Geräte dieselben Daten sehen
+        const FAIRNESS_WEIGHTS = {
+            totalPutz: 1.0,           // Gesamtdienste
+            freilosCount: 0.8,        // Freilose (wer viele hat, soll eher putzen)
+            fruehSpaetBalance: 1.2,   // Früh/Spät-Ungleichgewicht (wichtig!)
+            pmFruehSpaetBalance: 1.0, // PM Früh/Spät-Ungleichgewicht
+            lastAssigned: 0.3,        // Zeitlicher Abstand
+        };
+
+        // ==========================================
+        // FIREBASE FUNKTIONEN
+        // ==========================================
+        
         function getPlayerDocRef(playerName) {
-            return doc(db, 
-                `artifacts/${APP_ID}/public/data/${STATS_COLLECTION}`, 
-                playerName
-            );
+            return doc(db, `artifacts/${APP_ID}/public/data/${STATS_COLLECTION}`, playerName);
         }
 
         function getConfigDocRef() {
-            return doc(db, 
-                `artifacts/${APP_ID}/public/data/${CONFIG_DOC}`, 
-                "main" // Ein fixes Dokument für die Konfiguration
-            );
+            return doc(db, `artifacts/${APP_ID}/public/data/${CONFIG_DOC}`, "main");
         }
         
-        // Initialer Ladevorgang der Konfiguration
         async function loadConfig() {
             if (!db || !isAuthReady) return;
             const docSnap = await getDoc(getConfigDocRef());
             AppConfig = {
-                nextPutzmaschineType: 'Früh', // Default starting type
+                nextPutzmaschineType: 'Früh',
                 totalTrainings: 0,
+                dataVersion: '2.0',
                 ...(docSnap.exists() ? docSnap.data() : {})
             };
         }
         
-        // Initialer Ladevorgang aller Spielerstatistiken
+        // NEU: Template mit attendanceCount
+        function getPlayerStatsTemplate(name) {
+            return {
+                name: name,
+                // NEU: Anwesenheit zählt ALLE Anwesenheiten (Putzen + Freilos)
+                attendanceCount: 0,
+                // Freilose separat
+                freilosCount: 0,
+                // Putzdienste
+                totalPutz: 0,
+                fruehPutzCount: 0,
+                spaetPutzCount: 0,
+                // Putzmaschine
+                putzmaschineFruehCount: 0,
+                putzmaschineSpaetCount: 0,
+                // Zeitstempel
+                lastAssigned: 0,
+            };
+        }
+        
+        // Datenmigration von v1.4 auf v2.0
+        function migratePlayerData(oldData, name) {
+            const template = getPlayerStatsTemplate(name);
+            const migrated = { ...template, ...oldData };
+            
+            // Migration: Wenn attendanceCount nicht existiert, berechne es
+            if (oldData && typeof oldData.attendanceCount === 'undefined') {
+                // Alte Logik: attendanceCount = totalPutz (Freilose wurden nicht gezählt)
+                // Neue Logik: attendanceCount = totalPutz + freilosCount
+                migrated.attendanceCount = (oldData.totalPutz || 0) + (oldData.freilosCount || 0);
+                console.log(`Migration für ${name}: attendanceCount = ${migrated.attendanceCount}`);
+            }
+            
+            return migrated;
+        }
+        
         async function loadAllPlayerStats() {
             const promises = PLAYER_NAMES.map(async name => {
                 const docSnap = await getDoc(getPlayerDocRef(name));
-                const defaultStats = getPlayerStatsTemplate(name);
-                playerStats[name] = { ...defaultStats, ...(docSnap.exists() ? docSnap.data() : {}) };
+                const oldData = docSnap.exists() ? docSnap.data() : null;
+                playerStats[name] = migratePlayerData(oldData, name);
             });
             await Promise.all(promises);
-        }
-
-        function getPlayerStatsTemplate(name) {
-             return {
-                name: name,
-                freilosCount: 0,
-                putzmaschineFruehCount: 0,
-                putzmaschineSpaetCount: 0,
-                fruehPutzCount: 0,
-                spaetPutzCount: 0,
-                totalPutz: 0,
-                lastAssigned: 0, // Timestamp
-            };
         }
 
         async function updateConfig(updates) {
             if (!db || !isAuthReady) return;
             AppConfig = { ...AppConfig, ...updates };
-            const docRef = getConfigDocRef();
             try {
-                await setDoc(docRef, AppConfig, { merge: true });
+                await setDoc(getConfigDocRef(), AppConfig, { merge: true });
             } catch (error) {
                 console.error("Fehler beim Speichern der Konfiguration:", error);
             }
@@ -153,11 +199,9 @@
                 let firebaseConfig;
                 const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
-                // 1. Priorität: Canvas Secrets (wenn vorhanden)
                 if (typeof __firebase_config !== 'undefined') {
                     firebaseConfig = JSON.parse(__firebase_config);
                 } else {
-                    // Verwende die vom User bereitgestellten Schlüssel
                     firebaseConfig = {
                         apiKey: "AIzaSyDwMmGXsyG_KOM_QGUZJmGVNqq1P0VBtXk", 
                         authDomain: "handball-putzplan.firebaseapp.com",
@@ -178,14 +222,12 @@
                 userId = auth.currentUser?.uid || 'anonymous';
                 isAuthReady = true;
 
-                // Lade Daten synchron
                 await loadConfig();
                 await loadAllPlayerStats();
                 
-                document.getElementById('loading-message').textContent = 'Daten geladen.';
+                document.getElementById('loading-message').textContent = 'Daten geladen. Version 2.0 mit Fairness-Score aktiv!';
                 document.getElementById('loading-container').classList.add('hidden'); 
                 
-                // WICHTIG: Erst rendern
                 renderPlayerList();
                 updateShiftInfo();
                 
@@ -195,15 +237,110 @@
             }
         }
 
+        // ==========================================
+        // NEUE FAIRNESS-LOGIK (Multi-Kriterien)
+        // ==========================================
+        
+        /**
+         * Berechnet den Fairness-Score für einen Spieler.
+         * NIEDRIGER Score = wurde weniger belastet = sollte eher eingeteilt werden
+         * 
+         * @param {object} stats - Spielerstatistiken
+         * @param {string} targetShiftType - 'Früh' oder 'Spät' (für schichtspezifische Optimierung)
+         * @param {boolean} forPutzmaschine - Ob für Putzmaschinen-Auswahl
+         */
+        function calculateFairnessScore(stats, targetShiftType = null, forPutzmaschine = false) {
+            const w = FAIRNESS_WEIGHTS;
+            let score = 0;
+            
+            // 1. Gesamtdienste (Basis)
+            score += stats.totalPutz * w.totalPutz;
+            
+            // 2. Freilos-Ausgleich: Wer VIELE Freilose hat, hat einen NIEDRIGEREN Score
+            //    (soll eher putzen, um Ausgleich zu schaffen)
+            score -= stats.freilosCount * w.freilosCount * 0.5;
+            
+            // 3. Früh/Spät-Balance
+            const fruehSpaetDiff = Math.abs(stats.fruehPutzCount - stats.spaetPutzCount);
+            score += fruehSpaetDiff * w.fruehSpaetBalance;
+            
+            // 4. Schicht-spezifische Optimierung
+            if (targetShiftType === 'Früh') {
+                // Wer WENIGER Früh hat, bekommt niedrigeren Score für Früh
+                score += stats.fruehPutzCount * 0.8;
+                score -= stats.spaetPutzCount * 0.3;
+            } else if (targetShiftType === 'Spät') {
+                // Wer WENIGER Spät hat, bekommt niedrigeren Score für Spät
+                score += stats.spaetPutzCount * 0.8;
+                score -= stats.fruehPutzCount * 0.3;
+            }
+            
+            // 5. Putzmaschinen-spezifisch
+            if (forPutzmaschine) {
+                const pmDiff = Math.abs(stats.putzmaschineFruehCount - stats.putzmaschineSpaetCount);
+                score += pmDiff * w.pmFruehSpaetBalance;
+                
+                if (targetShiftType === 'Früh') {
+                    score += stats.putzmaschineFruehCount * 1.5;
+                } else if (targetShiftType === 'Spät') {
+                    score += stats.putzmaschineSpaetCount * 1.5;
+                }
+            }
+            
+            // 6. Zeitlicher Abstand (wer lange nicht dran war, hat niedrigeren Score)
+            const daysSinceAssigned = stats.lastAssigned > 0 
+                ? (Date.now() - stats.lastAssigned) / (1000 * 60 * 60 * 24)
+                : 999;
+            score -= Math.min(daysSinceAssigned, 30) * w.lastAssigned * 0.1;
+            
+            return score;
+        }
+        
+        /**
+         * Wählt Spieler basierend auf Multi-Kriterien-Fairness aus
+         */
+        function selectByFairness(playerNames, count, targetShiftType = null, forPutzmaschine = false) {
+            const playerObjects = playerNames.map(name => {
+                const stats = getPlayerStats(name);
+                return {
+                    name,
+                    stats,
+                    score: calculateFairnessScore(stats, targetShiftType, forPutzmaschine)
+                };
+            });
+            
+            // Sortiere nach Score (niedrigster zuerst = fairste Wahl)
+            playerObjects.sort((a, b) => {
+                if (Math.abs(a.score - b.score) < 0.01) {
+                    // Bei gleichem Score: wer länger nicht dran war
+                    return a.stats.lastAssigned - b.stats.lastAssigned;
+                }
+                return a.score - b.score;
+            });
+            
+            return playerObjects.slice(0, count);
+        }
+        
+        /**
+         * NEUE GLOBALE Putzmaschinen-Auswahl
+         * Wählt die fairste Putzmaschine aus ALLEN verfügbaren Spielern,
+         * nicht nur aus der bereits gewählten Crew
+         */
+        function selectPutzmaschineGlobal(availablePlayers, shiftType, excludeNames = []) {
+            const candidates = availablePlayers.filter(name => !excludeNames.includes(name));
+            const selected = selectByFairness(candidates, 1, shiftType, true);
+            return selected.length > 0 ? selected[0] : null;
+        }
 
-        // --- Core Utility Functions ---
+        // ==========================================
+        // HILFSFUNKTIONEN
+        // ==========================================
 
         function getWeekNumber(d = new Date()) {
             d = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
             d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
             const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
-            const weekNo = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
-            return weekNo;
+            return Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
         }
 
         function getPlayerStats(name) {
@@ -217,37 +354,57 @@
             const totalTrainings = AppConfig.totalTrainings || 0;
             
             document.getElementById('shift-info').innerHTML = `
-                Aktuelle KW: <span class="font-bold">${kw}</span> (${isEven ? 'Gerade' : 'Ungerade'}). 
-                Donnerstags-Schicht: <span class="font-bold">${donnerstagSchicht}</span>. 
-                Gesamte Trainings gezählt: <span class="font-bold">${totalTrainings}</span>
+                <div class="flex flex-wrap justify-center gap-4 text-sm">
+                    <span>KW: <span class="font-bold">${kw}</span> (${isEven ? 'Gerade' : 'Ungerade'})</span>
+                    <span>Donnerstag: <span class="font-bold">${donnerstagSchicht}</span></span>
+                    <span>Trainings: <span class="font-bold">${totalTrainings}</span></span>
+                    <span class="text-indigo-700 font-semibold">v2.0 Fairness-Score aktiv</span>
+                </div>
             `;
         }
         
-        // --- Rendering and Player Selection ---
+        // ==========================================
+        // RENDERING
+        // ==========================================
 
         function renderPlayerList() {
             const listElement = document.getElementById('player-list');
             listElement.innerHTML = '';
             
-            // Initialisiere die Auswahl, falls noch nicht geschehen
             if (selectedPlayers.size === 0 && PLAYER_NAMES.length > 0) {
-                 PLAYER_NAMES.forEach(name => selectedPlayers.add(name));
+                PLAYER_NAMES.forEach(name => selectedPlayers.add(name));
             }
 
             const totalTrainings = AppConfig.totalTrainings || 0;
             
             const sortedPlayers = PLAYER_NAMES.map(name => {
                 const stats = getPlayerStats(name);
-                const attendance = totalTrainings > 0 ? (stats.totalPutz / totalTrainings) * 100 : 0;
+                // NEU: Anwesenheitsquote basiert auf attendanceCount
+                const attendanceRate = totalTrainings > 0 
+                    ? (stats.attendanceCount / totalTrainings) * 100 
+                    : 0;
+                // Balance-Indikator
+                const fruehSpaetDiff = stats.fruehPutzCount - stats.spaetPutzCount;
                 return { 
                     ...stats, 
-                    attendance_percent: attendance.toFixed(1),
-                    absence_rate: (100 - attendance).toFixed(1)
+                    attendanceRate: attendanceRate.toFixed(0),
+                    fruehSpaetDiff
                 };
             }).sort((a, b) => a.name.localeCompare(b.name));
 
             sortedPlayers.forEach(player => {
                 const isSelected = selectedPlayers.has(player.name);
+                
+                // Balance-Farbe
+                let balanceClass = 'balance-good';
+                let balanceText = '⚖️';
+                if (Math.abs(player.fruehSpaetDiff) >= 3) {
+                    balanceClass = 'balance-bad';
+                    balanceText = player.fruehSpaetDiff > 0 ? '⬆️F' : '⬇️S';
+                } else if (Math.abs(player.fruehSpaetDiff) >= 2) {
+                    balanceClass = 'balance-ok';
+                    balanceText = player.fruehSpaetDiff > 0 ? '↑F' : '↓S';
+                }
 
                 const listItem = document.createElement('li');
                 listItem.className = 'flex items-center justify-between p-2 rounded-lg checkbox-item';
@@ -255,11 +412,16 @@
                 listItem.onclick = () => window.togglePlayer(player.name); 
 
                 listItem.innerHTML = `
-                    <div class="flex flex-col">
-                         <span class="font-medium text-gray-800">${player.name}</span>
-                         <div class="text-xs text-gray-500 mt-1">
-                            <span>Gesamtdienste: ${player.totalPutz}</span>
-                         </div>
+                    <div class="flex flex-col flex-1">
+                        <div class="flex items-center gap-2">
+                            <span class="font-medium text-gray-800">${player.name}</span>
+                            <span class="text-xs ${balanceClass}" title="Früh/Spät-Balance">${balanceText}</span>
+                        </div>
+                        <div class="text-xs text-gray-500 mt-1 flex gap-3">
+                            <span title="Putzdienste">🧹${player.totalPutz}</span>
+                            <span title="Freilose">🎫${player.freilosCount}</span>
+                            <span title="Anwesenheit">📊${player.attendanceRate}%</span>
+                        </div>
                     </div>
                     <div class="toggle-switch ${isSelected ? 'checked' : ''}"></div>
                 `;
@@ -288,38 +450,19 @@
                 return;
             }
             
-            // Hinzufügen zum Arbeitsspeicher (temporär)
             PLAYER_NAMES.push(playerName); 
             playerStats[playerName] = getPlayerStatsTemplate(playerName);
             selectedPlayers.add(playerName);
             renderPlayerList();
             
-            messageDiv.textContent = `Spieler '${playerName}' hinzugefügt. (ACHTUNG: Muss im Quellcode für dauerhafte Speicherung hinzugefügt werden.)`;
+            messageDiv.textContent = `'${playerName}' hinzugefügt. (Temporär bis Reload)`;
             messageDiv.className = "text-green-500 mt-2 text-sm";
             nameInput.value = '';
         }
 
-        // --- Fairness Logic ---
-
-        function selectPlayersByFairness(playerNames, count, metricGetter) {
-            const playerObjects = playerNames.map(name => ({
-                name,
-                stats: getPlayerStats(name),
-                metric: metricGetter(getPlayerStats(name))
-            }));
-            
-            playerObjects.sort((a, b) => {
-                if (a.metric !== b.metric) return a.metric - b.metric;
-                if (a.stats.lastAssigned !== b.stats.lastAssigned) return a.stats.lastAssigned - b.stats.lastAssigned;
-                return a.name.localeCompare(b.name);
-            });
-            
-            return playerObjects.slice(0, count).map(p => p.stats);
-        }
-
         function renderMessage(container, title, message, classes) {
-             container.innerHTML = `
-                <div class="p-4 rounded-lg ${classes} task-button">
+            container.innerHTML = `
+                <div class="p-4 rounded-lg ${classes}">
                     <h3 class="font-bold">${title}</h3>
                     <p class="text-sm">${message}</p>
                 </div>
@@ -328,45 +471,58 @@
         }
 
         function renderPutzplan(container, cache) {
-            let html = '<div class="space-y-6">';
-            let whatsappText = 'Putzplan - ' + new Date().toLocaleDateString('de-DE') + '\n\n';
+            let html = '<div class="space-y-4">';
+            let whatsappText = '🧹 Putzplan - ' + new Date().toLocaleDateString('de-DE') + '\n\n';
             
             cache.assignments.forEach(assignment => {
                 const bgClass = assignment.shiftType === 'Früh' ? 'bg-blue-50' : 'bg-green-50';
+                const pmStats = getPlayerStats(assignment.putzmaschine);
+                const pmTotal = pmStats.putzmaschineFruehCount + pmStats.putzmaschineSpaetCount;
                 
                 html += `
                     <div class="p-4 rounded-xl shadow-md ${bgClass}">
-                        <h3 class="text-xl font-bold text-gray-800 border-b pb-2 mb-2">${assignment.shiftName} (${assignment.players.length + 1} Spieler)</h3>
-                        <p class="font-semibold text-lg text-indigo-700 mb-2">Putzmaschine: <span class="text-indigo-900">${assignment.putzmaschine}</span></p>
-                        <p class="text-gray-700 text-sm">Crew: ${assignment.players.join(', ')}</p>
+                        <h3 class="text-lg font-bold text-gray-800 border-b pb-2 mb-2">
+                            ${assignment.shiftName} 
+                            <span class="text-sm font-normal text-gray-600">(${assignment.players.length + 1} Spieler)</span>
+                        </h3>
+                        <div class="mb-2">
+                            <span class="font-semibold text-indigo-700">Putzmaschine:</span>
+                            <span class="text-indigo-900 font-bold">${assignment.putzmaschine}</span>
+                            <span class="text-xs text-gray-500 ml-2">(bisher ${pmTotal}x PM)</span>
+                        </div>
+                        <div class="text-gray-700 text-sm">
+                            <span class="font-medium">Crew:</span> ${assignment.players.join(', ')}
+                        </div>
                     </div>
                 `;
 
-                whatsappText += `${assignment.shiftName}:\n`;
-                whatsappText += ` Maschine: ${assignment.putzmaschine}\n`;
-                whatsappText += ` Crew: ${assignment.players.join(', ')}\n\n`;
+                whatsappText += `*${assignment.shiftName}*\n`;
+                whatsappText += `🔧 Maschine: ${assignment.putzmaschine}\n`;
+                whatsappText += `👥 Crew: ${assignment.players.join(', ')}\n\n`;
             });
             
             if (cache.freilos.players.length > 0) {
-                 html += `
+                html += `
                     <div class="p-4 rounded-xl shadow-md bg-yellow-50">
-                        <h3 class="text-xl font-bold text-gray-800 border-b pb-2 mb-2">Freilos (${cache.freilos.count} Spieler)</h3>
+                        <h3 class="text-lg font-bold text-gray-800 border-b pb-2 mb-2">
+                            🎫 Freilos <span class="text-sm font-normal">(${cache.freilos.count} Spieler)</span>
+                        </h3>
                         <p class="text-gray-700 text-sm">${cache.freilos.players.join(', ')}</p>
+                        <p class="text-xs text-gray-500 mt-1">Diese Spieler waren anwesend, müssen aber nicht putzen.</p>
                     </div>
                 `;
-                whatsappText += `Freilos:\n ${cache.freilos.players.join(', ')}\n`;
-
-            } else {
-                html += '<p class="p-4 bg-gray-100 rounded-lg text-sm text-gray-600">Keine Freilose verteilt.</p>';
+                whatsappText += `🎫 *Freilos:*\n${cache.freilos.players.join(', ')}\n`;
             }
             
             html += `
                 </div>
-                <div class="mt-6 border-t pt-4">
-                    <button onclick="window.saveAssignment()" class="w-full py-3 px-6 bg-green-600 text-white font-bold text-lg rounded-xl hover:bg-green-700 task-button">
-                        Putzplan Bestätigen & Statistiken Speichern
+                <div class="mt-4 border-t pt-4">
+                    <button onclick="window.saveAssignment()" class="w-full py-3 px-6 bg-green-600 text-white font-bold text-lg rounded-xl hover:bg-green-700 transition-colors">
+                        ✅ Putzplan Bestätigen & Speichern
                     </button>
-                    <p class="text-xs text-center text-gray-500 mt-2">Bestätigung speichert die Putzdienste und aktualisiert die Fairness-Zähler.</p>
+                    <p class="text-xs text-center text-gray-500 mt-2">
+                        Speichert Dienste, Anwesenheit und Freilose korrekt.
+                    </p>
                 </div>
             `;
             container.innerHTML = html;
@@ -374,7 +530,9 @@
             renderWhatsappExport(whatsappText);
         }
         
-        // --- Putzplan Generierungs Logik ---
+        // ==========================================
+        // PUTZPLAN GENERIERUNG (NEUE LOGIK!)
+        // ==========================================
 
         window.generatePutzplan = function() {
             try {
@@ -386,140 +544,155 @@
                 assignmentCache = null; 
 
                 if (availablePlayers.length < 1) {
-                    renderMessage(resultDiv, 'Keine Spieler ausgewählt.', 'Bitte wählen Sie mindestens einen Spieler aus.', 'bg-red-100 text-red-800');
+                    renderMessage(resultDiv, 'Keine Spieler ausgewählt', 
+                        'Bitte wähle mindestens einen Spieler aus.', 'bg-red-100 text-red-800');
                     return;
                 }
                 
                 let assignments = [];
-                let currentPool = [...availablePlayers]; 
+                let freilosNames = [];
                 
                 if (variant === '1') {
-                    const playersToAssign = Math.min(availablePlayers.length, PLAYERS_PER_UNIT);
-                    let candidatesStats = selectPlayersByFairness(currentPool, playersToAssign, (p) => p.totalPutz);
-                    let candidatesNames = candidatesStats.map(s => s.name);
-                    const freilosNames = currentPool.filter(name => !candidatesNames.includes(name));
+                    // ==============================
+                    // VARIANTE 1: Eine Schicht
+                    // ==============================
+                    const shiftType = AppConfig.nextPutzmaschineType || 'Früh';
+                    const playersNeeded = Math.min(availablePlayers.length, PLAYERS_PER_UNIT);
                     
-                    const pmType = AppConfig.nextPutzmaschineType || 'Früh';
-                    const pmKey = pmType === 'Früh' ? 'putzmaschineFruehCount' : 'putzmaschineSpaetCount';
-                    const pmSelectionResult = selectPlayersByFairness(candidatesNames, 1, (p) => p[pmKey]);
-                    
-                    let putzmaschinePlayerStats;
-                    if (pmSelectionResult.length > 0) {
-                        putzmaschinePlayerStats = pmSelectionResult[0];
-                    } else if (candidatesStats.length > 0) {
-                        putzmaschinePlayerStats = candidatesStats[0];
-                    } else {
-                        renderMessage(resultDiv, 'Zuweisungsfehler', 'Keine anwesenden Spieler können zugewiesen werden.', 'bg-red-100 text-red-800');
+                    // 1. Wähle Putzmaschine GLOBAL (nicht aus Crew!)
+                    const pmSelection = selectPutzmaschineGlobal(availablePlayers, shiftType);
+                    if (!pmSelection) {
+                        renderMessage(resultDiv, 'Fehler', 'Keine Spieler verfügbar.', 'bg-red-100 text-red-800');
                         return;
                     }
-
-                    const cleanCrewWithoutPM = candidatesNames.filter(name => name !== putzmaschinePlayerStats.name);
+                    const putzmaschine = pmSelection.name;
+                    
+                    // 2. Wähle Crew (ohne PM) mit Schicht-Optimierung
+                    const remainingPlayers = availablePlayers.filter(n => n !== putzmaschine);
+                    const crewNeeded = playersNeeded - 1;
+                    const crewSelection = selectByFairness(remainingPlayers, crewNeeded, shiftType, false);
+                    const crewNames = crewSelection.map(p => p.name);
+                    
+                    // 3. Rest bekommt Freilos
+                    const allAssigned = [putzmaschine, ...crewNames];
+                    freilosNames = availablePlayers.filter(n => !allAssigned.includes(n));
                     
                     assignments.push({
-                        shiftName: `Putzdienst (eine Hälfte / Schicht ${pmType})`,
-                        shiftType: pmType,
-                        players: cleanCrewWithoutPM, 
-                        putzmaschine: putzmaschinePlayerStats.name, 
+                        shiftName: `Putzdienst (${shiftType})`,
+                        shiftType: shiftType,
+                        players: crewNames,
+                        putzmaschine: putzmaschine,
                     });
                     
                     assignmentCache = {
-                        assignments: assignments,
+                        assignments,
                         freilos: { players: freilosNames, count: freilosNames.length },
-                        nextPutzmaschineType: AppConfig.nextPutzmaschineType === 'Früh' ? 'Spät' : 'Früh' 
+                        nextPutzmaschineType: shiftType === 'Früh' ? 'Spät' : 'Früh',
+                        allPresentPlayers: availablePlayers // NEU: Alle Anwesenden speichern
                     };
 
                 } else if (variant === '2') {
-                    const totalNeeded = 2 * PLAYERS_PER_UNIT; 
-                    const playersToAssign = Math.min(availablePlayers.length, totalNeeded);
-
-                    if (playersToAssign < 2) {
-                         renderMessage(resultDiv, 'Zu wenig Spieler!', `Sie benötigen mindestens 2 Spieler für 2 Hälften, haben aber weniger als 2 ausgewählt.`, 'bg-red-100 text-red-800');
+                    // ==============================
+                    // VARIANTE 2: Zwei Schichten
+                    // ==============================
+                    const totalNeeded = 2 * PLAYERS_PER_UNIT;
+                    
+                    if (availablePlayers.length < 2) {
+                        renderMessage(resultDiv, 'Zu wenig Spieler', 
+                            'Für 2 Schichten werden mindestens 2 Spieler benötigt.', 'bg-red-100 text-red-800');
                         return;
                     }
                     
-                    const allCandidatesStats = selectPlayersByFairness(availablePlayers, playersToAssign, (p) => p.totalPutz);
-                    let availableForShifts = allCandidatesStats.map(s => s.name); 
-                    const freilosNames = availablePlayers.filter(name => !availableForShifts.includes(name));
+                    const playersToAssign = Math.min(availablePlayers.length, totalNeeded);
                     
-                    const sizePerShift = Math.floor(availableForShifts.length / 2);
-                    const remainder = availableForShifts.length % 2; 
-
-                    const shift1Type = 'Früh';
-                    const shift2Type = 'Spät';
-
-                    const shift1Key = 'fruehPutzCount';
-                    const pm1Key = 'putzmaschineFruehCount';
+                    // Berechne Verteilung
+                    const sizePerShift = Math.floor(playersToAssign / 2);
+                    const remainder = playersToAssign % 2;
                     const shift1Size = sizePerShift + remainder;
-
-                    const shift1CrewStats = selectPlayersByFairness(availableForShifts, shift1Size, (p) => p[shift1Key]);
-                    const shift1CrewNames = shift1CrewStats.map(s => s.name);
+                    const shift2Size = sizePerShift;
                     
-                    let remainingForShift2 = availableForShifts.filter(name => !shift1CrewNames.includes(name));
+                    // 1. Putzmaschinen GLOBAL auswählen
+                    const pm1Selection = selectPutzmaschineGlobal(availablePlayers, 'Früh');
+                    const pm1 = pm1Selection ? pm1Selection.name : availablePlayers[0];
                     
-                    const pm1SelectionResult = selectPlayersByFairness(shift1CrewNames, 1, (p) => p[pm1Key]);
-                    let putzmaschine1PlayerStats = pm1SelectionResult.length > 0 ? pm1SelectionResult[0] : getPlayerStats(shift1CrewNames[0]);
+                    const pm2Selection = selectPutzmaschineGlobal(availablePlayers, 'Spät', [pm1]);
+                    const pm2 = pm2Selection ? pm2Selection.name : availablePlayers.find(n => n !== pm1);
                     
-                    const shift1PlayersWithoutPM = shift1CrewNames.filter(name => name !== putzmaschine1PlayerStats.name);
-
+                    // 2. Restliche Spieler auf Schichten verteilen
+                    const remainingPlayers = availablePlayers.filter(n => n !== pm1 && n !== pm2);
+                    
+                    // Früh-Crew auswählen (optimiert für Früh)
+                    const crew1Needed = shift1Size - 1;
+                    const crew1Selection = selectByFairness(remainingPlayers, crew1Needed, 'Früh', false);
+                    const crew1Names = crew1Selection.map(p => p.name);
+                    
+                    // Spät-Crew = Rest
+                    const crew2Names = remainingPlayers.filter(n => !crew1Names.includes(n)).slice(0, shift2Size - 1);
+                    
+                    // Freilose
+                    const allAssigned = [pm1, pm2, ...crew1Names, ...crew2Names];
+                    freilosNames = availablePlayers.filter(n => !allAssigned.includes(n));
+                    
                     assignments.push({
-                        shiftName: `Schicht 1 (${shift1Type})`,
-                        shiftType: shift1Type,
-                        players: shift1PlayersWithoutPM,
-                        putzmaschine: putzmaschine1PlayerStats.name,
+                        shiftName: 'Schicht 1 (Früh)',
+                        shiftType: 'Früh',
+                        players: crew1Names,
+                        putzmaschine: pm1,
                     });
-
-                    if (remainingForShift2.length > 0) {
-                        const shift2Key = 'spaetPutzCount';
-                        const pm2Key = 'putzmaschineSpaetCount';
-                        const shift2CrewNames = remainingForShift2;
-                        const pm2SelectionResult = selectPlayersByFairness(shift2CrewNames, 1, (p) => p[pm2Key]);
-                        let putzmaschine2PlayerStats = pm2SelectionResult.length > 0 ? pm2SelectionResult[0] : getPlayerStats(shift2CrewNames[0]);
-                        const shift2PlayersWithoutPM = shift2CrewNames.filter(name => name !== putzmaschine2PlayerStats.name);
-
+                    
+                    if (pm2 || crew2Names.length > 0) {
                         assignments.push({
-                            shiftName: `Schicht 2 (${shift2Type})`,
-                            shiftType: shift2Type,
-                            players: shift2PlayersWithoutPM,
-                            putzmaschine: putzmaschine2PlayerStats.name,
+                            shiftName: 'Schicht 2 (Spät)',
+                            shiftType: 'Spät',
+                            players: crew2Names,
+                            putzmaschine: pm2,
                         });
                     }
                     
                     assignmentCache = {
-                        assignments: assignments,
+                        assignments,
                         freilos: { players: freilosNames, count: freilosNames.length },
-                        nextPutzmaschineType: AppConfig.nextPutzmaschineType 
+                        nextPutzmaschineType: AppConfig.nextPutzmaschineType,
+                        allPresentPlayers: availablePlayers
                     };
                 }
                 
                 renderPutzplan(resultDiv, assignmentCache);
 
             } catch (error) {
-                console.error("KRITISCHER FEHLER BEI PUTZPLAN-GENERIERUNG:", error);
-                renderMessage(resultDiv, 'Kritischer Fehler!', `Ein interner Fehler ist aufgetreten. Bitte prüfen Sie die Konsole. (Fehler: ${error.message})`, 'bg-red-100 text-red-800');
+                console.error("KRITISCHER FEHLER:", error);
+                renderMessage(document.getElementById('putzplan-result'), 
+                    'Kritischer Fehler', `${error.message}`, 'bg-red-100 text-red-800');
             }
         }
 
+        // ==========================================
+        // SPEICHERN (NEU: mit attendanceCount!)
+        // ==========================================
+
         window.saveAssignment = async function() {
             if (!assignmentCache || !db) {
-                 renderMessage(document.getElementById('putzplan-result'), 
-                              'Fehler', 
-                              'Kann Statistiken nicht speichern (Datenbank nicht bereit oder Putzplan fehlt).', 
-                              'bg-red-100 text-red-800');
+                renderMessage(document.getElementById('putzplan-result'), 
+                    'Fehler', 'Datenbank nicht bereit oder Putzplan fehlt.', 'bg-red-100 text-red-800');
                 return;
             }
             
             const now = Date.now();
             AppConfig.totalTrainings += 1;
             
-            await updateConfig({ totalTrainings: AppConfig.totalTrainings, nextPutzmaschineType: assignmentCache.nextPutzmaschineType });
+            await updateConfig({ 
+                totalTrainings: AppConfig.totalTrainings, 
+                nextPutzmaschineType: assignmentCache.nextPutzmaschineType 
+            });
 
             const promises = [];
             
+            // 1. Alle Putzdienst-Zuweisungen speichern
             assignmentCache.assignments.forEach(assignment => {
                 const shiftKey = assignment.shiftType === 'Früh' ? 'fruehPutzCount' : 'spaetPutzCount';
                 const pmKey = assignment.shiftType === 'Früh' ? 'putzmaschineFruehCount' : 'putzmaschineSpaetCount';
                 
-                const allAssigned = assignment.players.concat(assignment.putzmaschine);
+                const allAssigned = [assignment.putzmaschine, ...assignment.players];
 
                 allAssigned.forEach(name => {
                     const stats = getPlayerStats(name);
@@ -527,6 +700,7 @@
                     
                     const updates = {
                         totalPutz: (stats.totalPutz || 0) + 1,
+                        attendanceCount: (stats.attendanceCount || 0) + 1, // NEU!
                         lastAssigned: now,
                         [shiftKey]: (stats[shiftKey] || 0) + 1
                     };
@@ -534,90 +708,108 @@
                         updates[pmKey] = (stats[pmKey] || 0) + 1;
                     }
                     
+                    // Lokalen Cache aktualisieren
+                    playerStats[name] = { ...stats, ...updates };
                     promises.push(setDoc(getPlayerDocRef(name), updates, { merge: true }));
                 });
             });
 
+            // 2. Freilose speichern (NEU: auch attendanceCount erhöhen!)
             assignmentCache.freilos.players.forEach(name => {
-                 promises.push(setDoc(getPlayerDocRef(name), { freilosCount: getPlayerStats(name).freilosCount + 1, lastAssigned: now }, { merge: true }));
+                const stats = getPlayerStats(name);
+                const updates = {
+                    freilosCount: (stats.freilosCount || 0) + 1,
+                    attendanceCount: (stats.attendanceCount || 0) + 1, // NEU: Anwesenheit zählt!
+                    lastAssigned: now
+                };
+                
+                playerStats[name] = { ...stats, ...updates };
+                promises.push(setDoc(getPlayerDocRef(name), updates, { merge: true }));
             });
             
             try {
                 await Promise.all(promises);
                 document.getElementById('putzplan-result').innerHTML = `
-                    <div class="p-4 rounded-lg bg-green-100 text-green-800 task-button">
-                        <h3 class="font-bold">Erfolgreich gespeichert!</h3>
-                        <p class="text-sm">Die Statistiken wurden in der Cloud aktualisiert.</p>
+                    <div class="p-4 rounded-lg bg-green-100 text-green-800">
+                        <h3 class="font-bold">✅ Erfolgreich gespeichert!</h3>
+                        <p class="text-sm mt-1">
+                            ${assignmentCache.assignments.reduce((sum, a) => sum + a.players.length + 1, 0)} Putzdienste und 
+                            ${assignmentCache.freilos.count} Freilose wurden korrekt gezählt.
+                        </p>
+                        <p class="text-xs mt-2 text-green-700">
+                            Alle ${assignmentCache.allPresentPlayers?.length || '?'} anwesenden Spieler wurden für die Anwesenheitsstatistik erfasst.
+                        </p>
                     </div>
                 `;
                 assignmentCache = null;
-                await loadAllPlayerStats(); 
                 renderPlayerList();
                 updateShiftInfo();
             } catch (e) {
                 console.error("Speicherfehler:", e);
-                renderMessage(document.getElementById('putzplan-result'), 'Speicherfehler', 'Fehler beim Speichern in der Cloud-Datenbank.', 'bg-red-100 text-red-800');
+                renderMessage(document.getElementById('putzplan-result'), 
+                    'Speicherfehler', 'Fehler beim Cloud-Speichern.', 'bg-red-100 text-red-800');
             }
         }
         
-        // --- CSV Export Logic ---
+        // ==========================================
+        // CSV EXPORT (erweitert)
+        // ==========================================
         
         window.exportStatsToCSV = function() {
             if (PLAYER_NAMES.length === 0) {
-                alert('Keine Spielerdaten zum Exportieren vorhanden.');
+                alert('Keine Spielerdaten zum Exportieren.');
                 return;
             }
 
             const totalTrainings = AppConfig.totalTrainings || 0;
-            let csvContent = "Spieler;Gesamtdienste;Trainings_gezählt;Anwesenheit_Prozent;Fehlzeiten_Prozent;PM_Früh;PM_Spät;Frühschicht_Gesamt;Spätschicht_Gesamt;Freilose\n";
+            let csvContent = "Spieler;Anwesend;Geputzt;Freilose;Anwesenheit_%;Frueh;Spaet;PM_Frueh;PM_Spaet;Frueh_Spaet_Diff\n";
             
             PLAYER_NAMES.forEach(name => {
                 const stats = getPlayerStats(name);
-                const attendance = totalTrainings > 0 ? (stats.totalPutz / totalTrainings) * 100 : 0;
-                const absence = 100 - attendance;
+                const attendance = totalTrainings > 0 ? (stats.attendanceCount / totalTrainings) * 100 : 0;
+                const fruehSpaetDiff = stats.fruehPutzCount - stats.spaetPutzCount;
 
                 const row = [
                     stats.name,
+                    stats.attendanceCount,
                     stats.totalPutz,
-                    totalTrainings,
+                    stats.freilosCount,
                     attendance.toFixed(1),
-                    absence.toFixed(1),
-                    stats.putzmaschineFruehCount,
-                    stats.putzmaschineSpaetCount,
                     stats.fruehPutzCount,
                     stats.spaetPutzCount,
-                    stats.freilosCount
+                    stats.putzmaschineFruehCount,
+                    stats.putzmaschineSpaetCount,
+                    fruehSpaetDiff
                 ];
                 csvContent += row.join(";") + "\n";
             });
             
             const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
             const url = URL.createObjectURL(blob);
-            const filename = `Handball_Putzplan_Statistiken_${new Date().toISOString().slice(0, 10)}.csv`;
+            const filename = `Handball_Putzplan_v2_${new Date().toISOString().slice(0, 10)}.csv`;
             
             const link = document.createElement('a');
-            link.setAttribute('href', url);
-            link.setAttribute('download', filename);
-            link.style.visibility = 'hidden';
-            document.body.appendChild(link);
+            link.href = url;
+            link.download = filename;
             link.click();
-            document.body.removeChild(link);
 
-            alert('Statistiken erfolgreich als CSV heruntergeladen!');
+            alert('CSV exportiert!');
         }
 
-        // --- Rendering, Modal and Reset Functions ---
+        // ==========================================
+        // MODALS & UI
+        // ==========================================
 
         function renderWhatsappExport(text) {
             const container = document.getElementById('whatsapp-copy-container');
             container.innerHTML = `
-                <div class="mt-8 pt-4 border-t border-gray-200">
-                    <h3 class="text-xl font-semibold text-gray-800 mb-3">Zum Kopieren (WhatsApp-Format)</h3>
-                    <textarea id="whatsapp-output" class="w-full p-3 border border-gray-300 rounded-lg bg-gray-50 text-sm" readonly>${text}</textarea>
-                    <button onclick="window.copyToClipboard('whatsapp-output')" class="mt-2 w-full py-2 bg-indigo-500 text-white font-medium rounded-lg hover:bg-indigo-600">
-                        In die Zwischenablage kopieren
+                <div class="mt-4 pt-4 border-t border-gray-200">
+                    <h4 class="font-semibold text-gray-700 mb-2">📱 WhatsApp-Format</h4>
+                    <textarea id="whatsapp-output" class="w-full p-2 border border-gray-300 rounded-lg bg-gray-50 text-xs" readonly>${text}</textarea>
+                    <button onclick="window.copyToClipboard('whatsapp-output')" class="mt-2 w-full py-2 bg-indigo-500 text-white font-medium rounded-lg hover:bg-indigo-600 text-sm">
+                        📋 Kopieren
                     </button>
-                    <p id="copy-status" class="text-xs text-gray-500 mt-2 hidden">Kopiert!</p>
+                    <p id="copy-status" class="text-xs text-green-600 mt-1 hidden">Kopiert!</p>
                 </div>
             `;
             container.classList.remove('hidden');
@@ -629,64 +821,70 @@
             document.execCommand('copy');
             
             const status = document.getElementById('copy-status');
-            status.textContent = 'Ergebnis erfolgreich in die Zwischenablage kopiert!';
             status.classList.remove('hidden');
-            setTimeout(() => status.classList.add('hidden'), 3000);
+            setTimeout(() => status.classList.add('hidden'), 2000);
         }
         
-        // --- Statistik Detail Modal & EDITIEREN ---
         window.showPlayerDetails = function(playerName) {
             const stats = getPlayerStats(playerName);
             const totalTrainings = AppConfig.totalTrainings || 0;
-            const attendance = totalTrainings > 0 ? (stats.totalPutz / totalTrainings) * 100 : 0;
-            const absence = 100 - attendance;
+            const attendanceRate = totalTrainings > 0 ? (stats.attendanceCount / totalTrainings) * 100 : 0;
+            const fruehSpaetDiff = stats.fruehPutzCount - stats.spaetPutzCount;
+            const pmDiff = stats.putzmaschineFruehCount - stats.putzmaschineSpaetCount;
+            
+            // Fairness-Score berechnen
+            const fairnessScore = calculateFairnessScore(stats).toFixed(2);
             
             const modal = document.getElementById('details-modal');
             const content = document.getElementById('details-modal-content');
 
             content.innerHTML = `
-                <div class="flex justify-between items-center border-b pb-2 mb-4 pr-8">
-                    <div class="flex items-center gap-3">
-                         <h2 class="text-2xl font-bold text-gray-800">${playerName}</h2>
-                         <button onclick="window.enableEditMode('${playerName}')" class="text-xs bg-indigo-100 hover:bg-indigo-200 text-indigo-700 border border-indigo-200 font-semibold py-1 px-2 rounded">
-                            Bearbeiten
-                        </button>
+                <div class="flex justify-between items-center border-b pb-2 mb-4">
+                    <h2 class="text-2xl font-bold text-gray-800">${playerName}</h2>
+                    <button onclick="window.enableEditMode('${playerName}')" class="text-xs bg-indigo-100 hover:bg-indigo-200 text-indigo-700 font-semibold py-1 px-2 rounded">
+                        ✏️ Bearbeiten
+                    </button>
+                </div>
+                
+                <div class="mb-4 p-3 bg-indigo-50 rounded-lg">
+                    <div class="flex justify-between items-center">
+                        <span class="text-sm font-medium text-indigo-700">Fairness-Score</span>
+                        <span class="text-lg font-bold text-indigo-900">${fairnessScore}</span>
+                    </div>
+                    <p class="text-xs text-indigo-600 mt-1">Niedriger = weniger belastet = wird eher eingeteilt</p>
+                </div>
+                
+                <div class="grid grid-cols-2 gap-3 text-sm">
+                    <div class="p-3 bg-gray-50 rounded-lg">
+                        <p class="text-gray-600">Anwesend</p>
+                        <p class="text-xl font-bold">${stats.attendanceCount}x</p>
+                        <p class="text-xs text-gray-500">${attendanceRate.toFixed(0)}% Quote</p>
+                    </div>
+                    <div class="p-3 bg-gray-50 rounded-lg">
+                        <p class="text-gray-600">Geputzt</p>
+                        <p class="text-xl font-bold text-indigo-600">${stats.totalPutz}x</p>
+                    </div>
+                    <div class="p-3 bg-yellow-50 rounded-lg">
+                        <p class="text-gray-600">Freilose</p>
+                        <p class="text-xl font-bold text-yellow-600">${stats.freilosCount}x</p>
+                    </div>
+                    <div class="p-3 ${Math.abs(fruehSpaetDiff) >= 2 ? 'bg-red-50' : 'bg-green-50'} rounded-lg">
+                        <p class="text-gray-600">Früh/Spät-Balance</p>
+                        <p class="text-xl font-bold">${stats.fruehPutzCount}/${stats.spaetPutzCount}</p>
+                        <p class="text-xs ${Math.abs(fruehSpaetDiff) >= 2 ? 'text-red-600' : 'text-green-600'}">
+                            Diff: ${fruehSpaetDiff > 0 ? '+' : ''}${fruehSpaetDiff}
+                        </p>
                     </div>
                 </div>
-                <div class="grid grid-cols-2 gap-4 text-left">
-                    <div class="p-3 bg-gray-50 rounded-lg">
-                        <p class="text-sm text-gray-600">Gesamtdienste</p>
-                        <p class="text-xl font-bold text-indigo-600">${stats.totalPutz}</p>
-                    </div>
-                    <div class="p-3 bg-gray-50 rounded-lg">
-                        <p class="text-sm text-gray-600">Freilose</p>
-                        <p class="text-xl font-bold text-green-600">${stats.freilosCount}</p>
-                    </div>
-                    <div class="p-3 bg-gray-50 rounded-lg col-span-2">
-                        <p class="text-sm text-gray-600">Anwesenheitsquote (Trainings)</p>
-                        <p class="text-xl font-bold">${attendance.toFixed(1)}% (Fehlq.: ${absence.toFixed(1)}%)</p>
-                    </div>
-                    <div class="col-span-2">
-                        <h4 class="font-semibold mt-2 mb-1 text-gray-700">Putzmaschinen-Verteilung</h4>
-                        <ul class="space-y-1">
-                            <li class="flex justify-between p-2 bg-blue-100 rounded-lg">
-                                <span>Maschine Früh:</span> <span class="font-bold">${stats.putzmaschineFruehCount}x</span>
-                            </li>
-                            <li class="flex justify-between p-2 bg-green-100 rounded-lg">
-                                <span>Maschine Spät:</span> <span class="font-bold">${stats.putzmaschineSpaetCount}x</span>
-                            </li>
-                        </ul>
-                    </div>
-                    <div class="col-span-2">
-                        <h4 class="font-semibold mt-2 mb-1 text-gray-700">Schicht-Verteilung</h4>
-                        <ul class="space-y-1">
-                            <li class="flex justify-between p-2 bg-blue-50 rounded-lg">
-                                <span>Frühschicht (Gesamt):</span> <span class="font-bold">${stats.fruehPutzCount}x</span>
-                            </li>
-                            <li class="flex justify-between p-2 bg-green-50 rounded-lg">
-                                <span>Spätschicht (Gesamt):</span> <span class="font-bold">${stats.spaetPutzCount}x</span>
-                            </li>
-                        </ul>
+                
+                <div class="mt-4 p-3 bg-gray-50 rounded-lg">
+                    <p class="font-medium text-gray-700 mb-2">Putzmaschine</p>
+                    <div class="flex justify-between text-sm">
+                        <span>Früh: <strong>${stats.putzmaschineFruehCount}x</strong></span>
+                        <span>Spät: <strong>${stats.putzmaschineSpaetCount}x</strong></span>
+                        <span class="${Math.abs(pmDiff) >= 2 ? 'text-red-600' : 'text-green-600'}">
+                            Diff: ${pmDiff > 0 ? '+' : ''}${pmDiff}
+                        </span>
                     </div>
                 </div>
             `;
@@ -698,85 +896,79 @@
             const content = document.getElementById('details-modal-content');
             
             content.innerHTML = `
-                <h2 class="text-2xl font-bold text-gray-800 mb-4 border-b pb-2">Bearbeite: ${playerName}</h2>
-                <form id="edit-stats-form" class="space-y-3">
-                    <div class="grid grid-cols-2 gap-4">
-                        <div>
-                            <label class="block text-xs font-medium text-gray-700">Gesamtdienste</label>
-                            <input type="number" id="edit-totalPutz" value="${stats.totalPutz}" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm p-2 border">
-                        </div>
-                        <div>
-                            <label class="block text-xs font-medium text-gray-700">Freilose</label>
-                            <input type="number" id="edit-freilosCount" value="${stats.freilosCount}" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm p-2 border">
-                        </div>
-                        <div>
-                            <label class="block text-xs font-medium text-gray-700">PM Früh</label>
-                            <input type="number" id="edit-pmFrueh" value="${stats.putzmaschineFruehCount}" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm p-2 border">
-                        </div>
-                        <div>
-                            <label class="block text-xs font-medium text-gray-700">PM Spät</label>
-                            <input type="number" id="edit-pmSpaet" value="${stats.putzmaschineSpaetCount}" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm p-2 border">
-                        </div>
-                        <div>
-                            <label class="block text-xs font-medium text-gray-700">Frühschicht</label>
-                            <input type="number" id="edit-frueh" value="${stats.fruehPutzCount}" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm p-2 border">
-                        </div>
-                        <div>
-                            <label class="block text-xs font-medium text-gray-700">Spätschicht</label>
-                            <input type="number" id="edit-spaet" value="${stats.spaetPutzCount}" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm p-2 border">
-                        </div>
+                <h2 class="text-xl font-bold text-gray-800 mb-4 border-b pb-2">✏️ ${playerName} bearbeiten</h2>
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="block text-xs font-medium text-gray-700">Anwesenheit</label>
+                        <input type="number" id="edit-attendance" value="${stats.attendanceCount}" class="mt-1 w-full border rounded p-2">
                     </div>
-                    <div class="flex justify-end space-x-3 mt-4 pt-4 border-t">
-                        <button type="button" onclick="window.showPlayerDetails('${playerName}')" class="bg-gray-300 hover:bg-gray-400 text-gray-800 font-bold py-2 px-4 rounded">Abbrechen</button>
-                        <button type="button" onclick="window.saveEditedStats('${playerName}')" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded">Speichern</button>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-700">Geputzt</label>
+                        <input type="number" id="edit-totalPutz" value="${stats.totalPutz}" class="mt-1 w-full border rounded p-2">
                     </div>
-                </form>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-700">Freilose</label>
+                        <input type="number" id="edit-freilos" value="${stats.freilosCount}" class="mt-1 w-full border rounded p-2">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-700">Früh</label>
+                        <input type="number" id="edit-frueh" value="${stats.fruehPutzCount}" class="mt-1 w-full border rounded p-2">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-700">Spät</label>
+                        <input type="number" id="edit-spaet" value="${stats.spaetPutzCount}" class="mt-1 w-full border rounded p-2">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-700">PM Früh</label>
+                        <input type="number" id="edit-pmFrueh" value="${stats.putzmaschineFruehCount}" class="mt-1 w-full border rounded p-2">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-gray-700">PM Spät</label>
+                        <input type="number" id="edit-pmSpaet" value="${stats.putzmaschineSpaetCount}" class="mt-1 w-full border rounded p-2">
+                    </div>
+                </div>
+                <div class="flex justify-end gap-2 mt-4 pt-4 border-t">
+                    <button onclick="window.showPlayerDetails('${playerName}')" class="bg-gray-300 hover:bg-gray-400 text-gray-800 font-bold py-2 px-4 rounded">Abbrechen</button>
+                    <button onclick="window.saveEditedStats('${playerName}')" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded">Speichern</button>
+                </div>
             `;
         }
 
         window.saveEditedStats = async function(playerName) {
             const updates = {
+                attendanceCount: parseInt(document.getElementById('edit-attendance').value) || 0,
                 totalPutz: parseInt(document.getElementById('edit-totalPutz').value) || 0,
-                freilosCount: parseInt(document.getElementById('edit-freilosCount').value) || 0,
-                putzmaschineFruehCount: parseInt(document.getElementById('edit-pmFrueh').value) || 0,
-                putzmaschineSpaetCount: parseInt(document.getElementById('edit-pmSpaet').value) || 0,
+                freilosCount: parseInt(document.getElementById('edit-freilos').value) || 0,
                 fruehPutzCount: parseInt(document.getElementById('edit-frueh').value) || 0,
                 spaetPutzCount: parseInt(document.getElementById('edit-spaet').value) || 0,
+                putzmaschineFruehCount: parseInt(document.getElementById('edit-pmFrueh').value) || 0,
+                putzmaschineSpaetCount: parseInt(document.getElementById('edit-pmSpaet').value) || 0,
             };
 
             try {
                 await setDoc(getPlayerDocRef(playerName), updates, { merge: true });
-                // Update local cache
                 playerStats[playerName] = { ...playerStats[playerName], ...updates };
                 
-                alert('Statistiken aktualisiert!');
-                window.showPlayerDetails(playerName); // Go back to view mode
-                renderPlayerList(); // Refresh main list
+                alert('Gespeichert!');
+                window.showPlayerDetails(playerName);
+                renderPlayerList();
             } catch (e) {
-                console.error("Fehler beim Speichern:", e);
-                alert("Fehler beim Speichern der Änderungen.");
+                console.error("Fehler:", e);
+                alert("Speicherfehler!");
             }
         }
         
-        // --- Edit Total Trainings Logic ---
         window.editTotalTrainings = function() {
             const currentTotal = AppConfig.totalTrainings || 0;
-            const newTotal = prompt("Bitte geben Sie die korrigierte Gesamtzahl der Trainings ein:", currentTotal);
+            const newTotal = prompt("Gesamtzahl der Trainings:", currentTotal);
             
-            if (newTotal !== null && !isNaN(newTotal)) {
-                const parsedTotal = parseInt(newTotal);
-                if (parsedTotal >= 0) {
-                    // Update locally and in cloud
-                    AppConfig.totalTrainings = parsedTotal;
-                    updateConfig({ totalTrainings: parsedTotal }).then(() => {
-                        updateShiftInfo();
-                        renderStatsCards(); // Refresh modal content
-                        renderPlayerList(); // Refresh main list percentages
-                        alert("Trainingszähler aktualisiert!");
-                    });
-                } else {
-                    alert("Bitte eine gültige positive Zahl eingeben.");
-                }
+            if (newTotal !== null && !isNaN(newTotal) && parseInt(newTotal) >= 0) {
+                updateConfig({ totalTrainings: parseInt(newTotal) }).then(() => {
+                    updateShiftInfo();
+                    renderStatsCards();
+                    renderPlayerList();
+                    alert("Aktualisiert!");
+                });
             }
         }
 
@@ -791,33 +983,42 @@
         function renderStatsCards() {
             const container = document.getElementById('stats-card-container');
             container.innerHTML = `
-                <div class="col-span-full mb-4 p-2 bg-yellow-50 border border-yellow-200 rounded flex justify-between items-center">
-                    <span class="text-sm font-semibold text-yellow-800">Basis-Daten für Anwesenheit %:</span>
+                <div class="col-span-full mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg flex justify-between items-center">
+                    <span class="text-sm font-semibold text-yellow-800">Trainings gesamt: ${AppConfig.totalTrainings || 0}</span>
                     <button onclick="window.editTotalTrainings()" class="text-xs bg-white border border-yellow-300 text-yellow-800 px-2 py-1 rounded hover:bg-yellow-100">
-                        Gesamt-Trainingszähler korrigieren
+                        Korrigieren
                     </button>
                 </div>
             `;
             
             const sortedPlayers = PLAYER_NAMES.map(name => {
                 const stats = getPlayerStats(name);
-                return { ...stats, totalCleanings: stats.totalPutz };
-            }).sort((a, b) => b.totalCleanings - a.totalCleanings); 
+                const fairnessScore = calculateFairnessScore(stats);
+                return { ...stats, fairnessScore };
+            }).sort((a, b) => b.totalPutz - a.totalPutz);
 
             sortedPlayers.forEach((player, index) => {
                 const rank = index + 1;
-                const totalPM = player.putzmaschineFruehCount + player.putzmaschineSpaetCount;
+                const pmTotal = player.putzmaschineFruehCount + player.putzmaschineSpaetCount;
+                const balance = player.fruehPutzCount - player.spaetPutzCount;
+                const balanceClass = Math.abs(balance) >= 2 ? 'text-red-600' : 'text-green-600';
                 
                 const card = document.createElement('div');
-                card.className = 'player-stat-card container-card p-4 text-center';
+                card.className = 'player-stat-card container-card p-3 text-center';
                 card.onclick = () => window.showPlayerDetails(player.name);
 
                 card.innerHTML = `
-                    <div class="text-xl font-extrabold mb-1 text-indigo-700">${rank}. ${player.name}</div>
-                    <p class="text-4xl font-bold mb-2">${player.totalCleanings}x</p>
-                    <p class="text-sm text-gray-600">Putzdienste (Gesamt)</p>
-                    <div class="mt-2 pt-2 border-t text-xs">
-                        PM: <span class="font-bold">${totalPM}x</span> | Frei: <span class="font-bold">${player.freilosCount}x</span>
+                    <div class="text-lg font-bold text-indigo-700">${rank}. ${player.name}</div>
+                    <p class="text-3xl font-bold my-1">${player.totalPutz}x</p>
+                    <p class="text-xs text-gray-500">Putzdienste</p>
+                    <div class="mt-2 pt-2 border-t text-xs grid grid-cols-2 gap-1">
+                        <span>📊 ${player.attendanceCount}x da</span>
+                        <span>🎫 ${player.freilosCount}x frei</span>
+                        <span class="${balanceClass}">F/S: ${player.fruehPutzCount}/${player.spaetPutzCount}</span>
+                        <span>PM: ${pmTotal}x</span>
+                    </div>
+                    <div class="mt-2 text-xs text-indigo-600">
+                        Score: ${player.fairnessScore.toFixed(1)}
                     </div>
                 `;
                 container.appendChild(card);
@@ -830,9 +1031,9 @@
 
         window.resetAllStats = async function() {
             if (!db) {
-                 window.toggleResetModal();
-                 alert('Fehler: Cloud-Datenbank ist nicht verbunden. Löschen nicht möglich.');
-                 return;
+                alert('Datenbank nicht verbunden.');
+                window.toggleResetModal();
+                return;
             }
             
             const promises = [];
@@ -845,9 +1046,9 @@
                 await Promise.all(promises);
                 window.toggleResetModal(); 
                 document.getElementById('putzplan-result').innerHTML = `
-                    <div class="p-4 rounded-lg bg-red-100 text-red-800 task-button">
-                        <h3 class="font-bold">Statistiken gelöscht!</h3>
-                        <p class="text-sm">Alle Cloud-Daten wurden auf Null zurückgesetzt.</p>
+                    <div class="p-4 rounded-lg bg-red-100 text-red-800">
+                        <h3 class="font-bold">🗑️ Alle Statistiken gelöscht!</h3>
+                        <p class="text-sm">Neue Saison kann beginnen.</p>
                     </div>
                 `;
                 await loadConfig();
@@ -855,128 +1056,146 @@
                 renderPlayerList();
                 updateShiftInfo();
             } catch (e) {
-                 window.toggleResetModal();
-                 alert('Kritischer Fehler beim Löschen der Cloud-Daten.');
+                window.toggleResetModal();
+                alert('Fehler beim Löschen.');
             }
         }
         
         function updateUserCountInfo() {
             const count = selectedPlayers.size;
-            const element = document.getElementById('user-count-info');
-            element.classList.remove('hidden');
-            element.innerHTML = `Aktuell ausgewählte Spieler: <span class="font-bold">${count}</span>`;
+            document.getElementById('user-count-info').innerHTML = `
+                <span class="font-bold">${count}</span> Spieler ausgewählt
+            `;
+            document.getElementById('user-count-info').classList.remove('hidden');
         }
 
         window.addEventListener('load', initializeFirebase);
 
     </script>
 </head>
-<body class="p-4 sm:p-8 min-h-screen">
+<body class="p-4 sm:p-6 min-h-screen">
 
     <div id="loading-container" class="fixed inset-0 bg-gray-50 flex items-center justify-center z-50">
-        <p id="loading-message" class="text-xl font-semibold text-indigo-600">App wird initialisiert und Statistiken aus der Cloud geladen...</p>
+        <div class="text-center">
+            <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto mb-4"></div>
+            <p id="loading-message" class="text-lg font-semibold text-indigo-600">Lade Daten aus der Cloud...</p>
+        </div>
     </div>
 
-    <div class="max-w-4xl mx-auto space-y-8">
+    <div class="max-w-5xl mx-auto space-y-6">
         <header class="text-center">
-            <h1 class="text-3xl sm:text-4xl font-extrabold text-gray-900 mb-2">Handball Putzplan Generator</h1>
-            <p class="text-lg text-gray-600">Cloud-basierte Rotation & Statistiken</p>
-            <div id="shift-info" class="mt-4 p-3 bg-indigo-100 text-indigo-800 rounded-lg text-sm font-medium"></div>
+            <h1 class="text-3xl sm:text-4xl font-extrabold text-gray-900 mb-2">🧹 Handball Putzplan</h1>
+            <p class="text-gray-600">Multi-Kriterien Fairness-System</p>
+            <div id="shift-info" class="mt-3 p-3 bg-indigo-100 text-indigo-800 rounded-lg text-sm"></div>
         </header>
 
-        <main class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <!-- Player Selection -->
-            <div class="lg:col-span-1 container-card p-6">
-                <h2 class="text-2xl font-semibold text-gray-800 mb-4 border-b pb-2">Spieler Anwesenheit & Statistik</h2>
-                <div class="h-80 overflow-y-auto pr-2 mb-4">
+        <main class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            <!-- Spieler-Auswahl -->
+            <div class="lg:col-span-1 container-card p-4">
+                <h2 class="text-xl font-semibold text-gray-800 mb-3 border-b pb-2">👥 Anwesende Spieler</h2>
+                <div class="h-72 overflow-y-auto pr-2 mb-3">
                     <ul id="player-list" class="space-y-1"></ul>
                 </div>
-                <div class="mt-4 pt-4 border-t border-gray-200">
-                    <h3 class="text-lg font-semibold mb-2">Spieler Hinzufügen (temporär):</h3>
-                    <div class="flex space-x-2">
-                        <input type="text" id="new-player-name" placeholder="Neuer Spielername" class="flex-grow p-2 border border-gray-300 rounded-lg">
-                        <button onclick="window.addNewPlayer()" class="py-2 px-4 bg-indigo-500 text-white font-medium rounded-lg hover:bg-indigo-600">+ Add</button>
+                <div class="pt-3 border-t">
+                    <div class="flex gap-2">
+                        <input type="text" id="new-player-name" placeholder="Neuer Spieler" class="flex-1 p-2 border rounded-lg text-sm">
+                        <button onclick="window.addNewPlayer()" class="py-2 px-3 bg-indigo-500 text-white font-medium rounded-lg hover:bg-indigo-600 text-sm">+</button>
                     </div>
-                    <p id="add-player-message"></p>
+                    <p id="add-player-message" class="text-xs mt-1"></p>
                 </div>
             </div>
 
-            <!-- Configuration -->
-            <div class="lg:col-span-1 container-card p-6 flex flex-col justify-between">
-                <div class="space-y-6">
-                    <div>
-                        <h2 class="text-2xl font-semibold text-gray-800 mb-4 border-b pb-2">Putz-Variante wählen</h2>
-                        <p class="text-sm text-gray-600 mb-3">Jede Einheit benötigt 7 Spieler. Die App weist alle verfügbaren Spieler zu, falls weniger als benötigt anwesend sind.</p>
-                        <div class="space-y-3">
-                            <label id="variant-1-label" class="flex items-center space-x-3 bg-blue-50 p-3 rounded-lg task-button">
-                                <input id="variant-1-radio" type="radio" name="variant" value="1" checked class="form-radio text-indigo-600 h-4 w-4">
-                                <span class="font-medium text-gray-700">Variante 1: Nur eine Hälfte putzen (7 Spieler benötigt)</span>
-                            </label>
-                            <label id="variant-2-label" class="flex items-center space-x-3 bg-blue-50 p-3 rounded-lg task-button">
-                                <input id="variant-2-radio" type="radio" name="variant" value="2" class="form-radio text-indigo-600 h-4 w-4">
-                                <span class="font-medium text-gray-700">Variante 2: Zwei Hälften putzen (14 Spieler benötigt)</span>
-                            </label>
+            <!-- Konfiguration -->
+            <div class="lg:col-span-1 container-card p-4 flex flex-col">
+                <h2 class="text-xl font-semibold text-gray-800 mb-3 border-b pb-2">⚙️ Einstellungen</h2>
+                
+                <div class="space-y-3 flex-1">
+                    <p class="text-sm text-gray-600">Pro Schicht werden 7 Spieler benötigt (1 Putzmaschine + 6 Crew).</p>
+                    
+                    <label class="flex items-center gap-3 bg-blue-50 p-3 rounded-lg cursor-pointer hover:bg-blue-100">
+                        <input type="radio" name="variant" value="1" checked class="form-radio text-indigo-600 h-4 w-4">
+                        <div>
+                            <span class="font-medium text-gray-700">Eine Schicht</span>
+                            <p class="text-xs text-gray-500">7 Spieler putzen</p>
                         </div>
-                    </div>
-                    <div id="user-count-info" class="p-3 bg-yellow-100 text-yellow-800 rounded-lg text-sm font-medium hidden"></div>
+                    </label>
+                    
+                    <label class="flex items-center gap-3 bg-green-50 p-3 rounded-lg cursor-pointer hover:bg-green-100">
+                        <input type="radio" name="variant" value="2" class="form-radio text-indigo-600 h-4 w-4">
+                        <div>
+                            <span class="font-medium text-gray-700">Zwei Schichten</span>
+                            <p class="text-xs text-gray-500">14 Spieler (Früh + Spät)</p>
+                        </div>
+                    </label>
+                    
+                    <div id="user-count-info" class="p-2 bg-yellow-100 text-yellow-800 rounded-lg text-sm text-center hidden"></div>
                 </div>
-                <button onclick="window.generatePutzplan()" class="mt-6 w-full py-3 px-6 bg-indigo-600 text-white font-bold text-lg rounded-xl hover:bg-indigo-700 task-button">Putzplan Generieren</button>
+                
+                <button onclick="window.generatePutzplan()" class="mt-4 w-full py-3 bg-indigo-600 text-white font-bold text-lg rounded-xl hover:bg-indigo-700 transition-colors">
+                    🎲 Putzplan Generieren
+                </button>
             </div>
 
-            <!-- Result -->
-            <div class="lg:col-span-1 container-card p-6">
-                <h2 class="text-2xl font-semibold text-gray-800 mb-4 border-b pb-2">Ergebnis & Bestätigung</h2>
-                <div id="putzplan-result" class="space-y-4">
-                    <p class="text-gray-500">Klicken Sie auf "Putzplan Generieren", um die faire Einteilung zu sehen.</p>
+            <!-- Ergebnis -->
+            <div class="lg:col-span-1 container-card p-4">
+                <h2 class="text-xl font-semibold text-gray-800 mb-3 border-b pb-2">📋 Ergebnis</h2>
+                <div id="putzplan-result">
+                    <p class="text-gray-500 text-sm">Klicke auf "Generieren" für eine faire Zuweisung.</p>
                 </div>
-                <div id="whatsapp-copy-container" class="mt-4 hidden"></div>
+                <div id="whatsapp-copy-container" class="hidden"></div>
             </div>
         </main>
         
-        <!-- Stats and Reset Buttons -->
-        <div class="flex justify-center space-x-4 mt-8">
-            <button onclick="window.toggleStatsModal()" class="text-indigo-600 hover:text-indigo-800 font-medium text-sm p-2 rounded-lg bg-white shadow-md task-button">Saison-Statistiken anzeigen</button>
-             <button onclick="window.toggleResetModal()" class="text-red-600 hover:text-red-800 font-medium text-sm p-2 rounded-lg bg-white shadow-md task-button">Statistiken zurücksetzen (Saisonende)</button>
-            <button onclick="window.exportStatsToCSV()" class="text-green-700 hover:text-green-900 font-medium text-sm p-2 rounded-lg bg-white shadow-md task-button border border-green-300">Statistiken als CSV exportieren</button>
+        <!-- Action Buttons -->
+        <div class="flex flex-wrap justify-center gap-3">
+            <button onclick="window.toggleStatsModal()" class="text-indigo-600 hover:text-indigo-800 font-medium text-sm p-2 rounded-lg bg-white shadow-md">
+                📊 Statistiken
+            </button>
+            <button onclick="window.exportStatsToCSV()" class="text-green-700 hover:text-green-900 font-medium text-sm p-2 rounded-lg bg-white shadow-md border border-green-300">
+                📥 CSV Export
+            </button>
+            <button onclick="window.toggleResetModal()" class="text-red-600 hover:text-red-800 font-medium text-sm p-2 rounded-lg bg-white shadow-md">
+                🗑️ Reset
+            </button>
         </div>
     </div>
     
-    <!-- Stats Overview Modal -->
+    <!-- Stats Modal -->
     <div id="stats-modal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-75 z-50 overflow-y-auto modal-container">
-        <div class="container-card w-full max-w-6xl p-6 relative modal-scrollable-content">
-            <h2 class="text-2xl font-bold text-gray-800 mb-4 border-b pb-2">Saison-Statistiken Übersicht (Rangliste)</h2>
+        <div class="container-card w-full max-w-5xl p-6 relative modal-scrollable-content">
+            <h2 class="text-2xl font-bold text-gray-800 mb-4 border-b pb-2">📊 Saison-Statistiken</h2>
             <button onclick="window.toggleStatsModal()" class="absolute top-4 right-4 text-gray-500 hover:text-gray-800">
-                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
             </button>
             <div id="stats-card-container"></div>
-            <p class="text-xs text-gray-500 mt-4">Klicken Sie auf eine Karte, um die detaillierte Verteilung der Früh/Spät-Dienste zu sehen.</p>
+            <p class="text-xs text-gray-500 mt-4">Klicke auf einen Spieler für Details.</p>
         </div>
     </div>
     
     <!-- Player Details Modal -->
     <div id="details-modal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-75 z-50 overflow-y-auto modal-container">
-        <div class="container-card w-full max-w-lg p-6 relative">
-             <button onclick="document.getElementById('details-modal').classList.add('hidden')" class="absolute top-4 right-4 text-gray-500 hover:text-gray-800">
-                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+        <div class="container-card w-full max-w-md p-6 relative">
+            <button onclick="document.getElementById('details-modal').classList.add('hidden')" class="absolute top-4 right-4 text-gray-500 hover:text-gray-800">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
             </button>
             <div id="details-modal-content"></div>
         </div>
     </div>
 
-    <!-- Reset Confirmation Modal -->
+    <!-- Reset Modal -->
     <div id="reset-modal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-75 z-50 flex items-center justify-center p-4">
-        <div class="container-card w-full max-w-md p-6 relative text-center">
-            <h2 class="text-xl font-bold text-red-600 mb-3">ACHTUNG: Statistiken wirklich löschen?</h2>
-            <p class="text-gray-700 mb-6">Sind Sie sicher, dass Sie *alle* Putz-Statistiken unwiderruflich löschen möchten? Dies startet die Fairness-Rotation von Neuem.</p>
-            <div class="flex justify-center space-x-4">
+        <div class="container-card w-full max-w-md p-6 text-center">
+            <h2 class="text-xl font-bold text-red-600 mb-3">⚠️ Wirklich alles löschen?</h2>
+            <p class="text-gray-700 mb-6">Alle Statistiken werden unwiderruflich gelöscht. Dies sollte nur am Saisonende gemacht werden.</p>
+            <div class="flex justify-center gap-4">
                 <button onclick="window.toggleResetModal()" class="py-2 px-4 bg-gray-300 text-gray-800 font-medium rounded-lg hover:bg-gray-400">Abbrechen</button>
-                <button onclick="window.resetAllStats()" class="py-2 px-4 bg-red-600 text-white font-medium rounded-lg hover:bg-red-700">JA, Statistiken unwiderruflich löschen</button>
+                <button onclick="window.resetAllStats()" class="py-2 px-4 bg-red-600 text-white font-medium rounded-lg hover:bg-red-700">Ja, alles löschen</button>
             </div>
         </div>
     </div>
     
-    <footer class="text-center text-gray-400 text-xs mt-12 mb-4">
-        Cloud Sync Active
+    <footer class="text-center text-gray-400 text-xs mt-8">
+        v2.0 | Multi-Kriterien Fairness-Score | Cloud Sync
     </footer>
 </body>
 </html>
