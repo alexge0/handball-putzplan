@@ -470,7 +470,7 @@
 
         function renderPutzplan(container, cache) {
             let html = '<div class="space-y-4">';
-            let whatsappText = '🧹 Putzplan - ' + new Date().toLocaleDateString('de-DE') + '\n\n';
+            let whatsappText = 'Putzplan - ' + new Date().toLocaleDateString('de-DE') + '\n\n';
             
             cache.assignments.forEach(assignment => {
                 const bgClass = assignment.shiftType === 'Früh' ? 'bg-blue-50' : 'bg-green-50';
