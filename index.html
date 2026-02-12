@@ -639,12 +639,11 @@
             const assignment = assignmentCache.assignments[shiftIndex];
             const isPM = playerIndex === 'pm';
             
-            // Alle verfügbaren Spieler (die nicht schon in dieser Schicht sind)
-            const usedInShift = [assignment.putzmaschine, ...assignment.players];
-            const availablePlayers = assignmentCache.allPresentPlayers.filter(p => !usedInShift.includes(p) || p === currentPlayer);
-            
-            // Freilos-Spieler auch anzeigen
+            // Freilos-Spieler
             const freilosPlayers = assignmentCache.freilos.players;
+            
+            // NEU: Crew-Mitglieder (für PM-Tausch)
+            const crewPlayers = assignment.players.filter(p => p !== currentPlayer);
             
             content.innerHTML = `
                 <h2 class="text-xl font-bold text-gray-800 mb-4 border-b pb-2">
@@ -655,21 +654,42 @@
                 </p>
                 
                 <div class="space-y-2 max-h-60 overflow-y-auto">
-                    <p class="text-xs font-semibold text-gray-500 uppercase">Aus Putzdienst:</p>
-                    ${availablePlayers.filter(p => p !== currentPlayer).map(player => {
-                        const stats = getPlayerStats(player);
-                        const pmCount = stats.putzmaschineFruehCount + stats.putzmaschineSpaetCount;
-                        return `
-                            <button onclick="window.swapPlayer(${shiftIndex}, '${playerIndex}', '${currentPlayer}', '${player}')" 
-                                class="w-full text-left p-2 rounded-lg hover:bg-indigo-50 border border-gray-200 flex justify-between items-center">
-                                <span>${player}</span>
-                                <span class="text-xs text-gray-500">🧹${stats.totalPutz} | PM:${pmCount}</span>
-                            </button>
-                        `;
-                    }).join('') || '<p class="text-gray-400 text-sm">Keine weiteren Spieler</p>'}
+                    ${isPM ? `
+                        <p class="text-xs font-semibold text-gray-500 uppercase">Crew-Mitglied zur Putzmaschine machen:</p>
+                        ${crewPlayers.length > 0 ? crewPlayers.map(player => {
+                            const stats = getPlayerStats(player);
+                            const pmCount = stats.putzmaschineFruehCount + stats.putzmaschineSpaetCount;
+                            return `
+                                <button onclick="window.swapPMWithCrew(${shiftIndex}, '${currentPlayer}', '${player}')" 
+                                    class="w-full text-left p-2 rounded-lg hover:bg-indigo-50 border border-gray-200 flex justify-between items-center">
+                                    <span>${player}</span>
+                                    <span class="text-xs text-gray-500">🧹${stats.totalPutz} | PM:${pmCount}</span>
+                                </button>
+                            `;
+                        }).join('') : '<p class="text-gray-400 text-sm italic">Keine Crew-Mitglieder</p>'}
+                    ` : `
+                        <p class="text-xs font-semibold text-gray-500 uppercase">Mit anderem Crew-Mitglied tauschen:</p>
+                        ${crewPlayers.length > 0 ? crewPlayers.map(player => {
+                            const stats = getPlayerStats(player);
+                            return `
+                                <button onclick="window.swapCrewMembers(${shiftIndex}, ${playerIndex}, '${currentPlayer}', '${player}')" 
+                                    class="w-full text-left p-2 rounded-lg hover:bg-indigo-50 border border-gray-200 flex justify-between items-center">
+                                    <span>${player}</span>
+                                    <span class="text-xs text-gray-500">🧹${stats.totalPutz}</span>
+                                </button>
+                            `;
+                        }).join('') : '<p class="text-gray-400 text-sm italic">Keine weiteren Crew-Mitglieder</p>'}
+                        
+                        <p class="text-xs font-semibold text-gray-500 uppercase mt-4">Zur Putzmaschine machen:</p>
+                        <button onclick="window.promoteToRM(${shiftIndex}, ${playerIndex}, '${currentPlayer}')" 
+                            class="w-full text-left p-2 rounded-lg hover:bg-amber-50 border border-amber-300 flex justify-between items-center">
+                            <span>⬆️ ${currentPlayer} zur Putzmaschine</span>
+                            <span class="text-xs text-amber-600">(${assignment.putzmaschine} wird Crew)</span>
+                        </button>
+                    `}
                     
                     ${freilosPlayers.length > 0 ? `
-                        <p class="text-xs font-semibold text-gray-500 uppercase mt-4">Aus Freilos:</p>
+                        <p class="text-xs font-semibold text-gray-500 uppercase mt-4">Aus Freilos holen:</p>
                         ${freilosPlayers.map(player => {
                             const stats = getPlayerStats(player);
                             const pmCount = stats.putzmaschineFruehCount + stats.putzmaschineSpaetCount;
@@ -688,7 +708,7 @@
                     ${!isPM ? `
                         <button onclick="window.removePlayerFromShift(${shiftIndex}, ${playerIndex}, '${currentPlayer}')" 
                             class="text-red-600 hover:text-red-800 text-sm">
-                            🗑️ Entfernen
+                            🗑️ Zu Freilos verschieben
                         </button>
                     ` : '<div></div>'}
                     <button onclick="document.getElementById('swap-modal').classList.add('hidden')" 
@@ -700,28 +720,45 @@
             modal.classList.remove('hidden');
         }
         
-        window.swapPlayer = function(shiftIndex, playerIndex, oldPlayer, newPlayer) {
+        // NEU: PM mit Crew-Mitglied tauschen
+        window.swapPMWithCrew = function(shiftIndex, currentPM, newPM) {
             const assignment = assignmentCache.assignments[shiftIndex];
             
-            if (playerIndex === 'pm') {
-                // PM tauschen
-                const oldPM = assignment.putzmaschine;
-                assignment.putzmaschine = newPlayer;
-                
-                // Alten PM in die Crew verschieben (falls er anwesend war)
-                if (!assignment.players.includes(oldPM)) {
-                    assignment.players.push(oldPM);
-                }
-                // Neuen PM aus der Crew entfernen
-                assignment.players = assignment.players.filter(p => p !== newPlayer);
-            } else {
-                // Crew-Mitglied tauschen
-                assignment.players[playerIndex] = newPlayer;
-            }
+            // Neuen PM aus Crew entfernen
+            assignment.players = assignment.players.filter(p => p !== newPM);
+            // Alten PM zur Crew hinzufügen
+            assignment.players.push(currentPM);
+            // Neuen PM setzen
+            assignment.putzmaschine = newPM;
             
             document.getElementById('swap-modal').classList.add('hidden');
             renderEditablePutzplan(document.getElementById('putzplan-result'), assignmentCache);
         }
+        
+        // NEU: Crew-Mitglied zur Putzmaschine befördern
+        window.promoteToRM = function(shiftIndex, playerIndex, playerName) {
+            const assignment = assignmentCache.assignments[shiftIndex];
+            const oldPM = assignment.putzmaschine;
+            
+            // Spieler aus Crew entfernen
+            assignment.players.splice(playerIndex, 1);
+            // Alten PM zur Crew hinzufügen
+            assignment.players.push(oldPM);
+            // Neuen PM setzen
+            assignment.putzmaschine = playerName;
+            
+            document.getElementById('swap-modal').classList.add('hidden');
+            renderEditablePutzplan(document.getElementById('putzplan-result'), assignmentCache);
+        }
+        
+        // NEU: Zwei Crew-Mitglieder tauschen (Positionen)
+        window.swapCrewMembers = function(shiftIndex, playerIndex, player1, player2) {
+            // Eigentlich nur visuelle Neuanordnung, aber für Konsistenz
+            document.getElementById('swap-modal').classList.add('hidden');
+            renderEditablePutzplan(document.getElementById('putzplan-result'), assignmentCache);
+        }
+        
+        // Wird nicht mehr benötigt - durch swapPMWithCrew ersetzt
         
         window.swapPlayerFromFreilos = function(shiftIndex, playerIndex, oldPlayer, newPlayer) {
             const assignment = assignmentCache.assignments[shiftIndex];
