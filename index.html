@@ -1,20 +1,25 @@
 <!-- 
     HANDBALL PUTZPLAN GENERATOR
-    Version: 2.0
+    Version: 2.1
     Features: 
     - NEUER Multi-Kriterien-Fairness-Score
     - Anwesenheit vs. Freilos getrennt (attendanceCount)
     - Schicht-spezifische Optimierung
     - Globale Putzmaschinen-Auswahl
-    - Automatische Datenmigration von v1.4
+    - Automatische Datenmigration von v1.4 & v2.0
     - Cloud-Sync (Firebase), Dynamische 7er-Teams, CSV-Export, Editor-Modus
+    
+    NEU in v2.1:
+    - Umbenennung Niklas T. → Patrick C. (mit Datenmigration)
+    - Putzplan editierbar vor dem Speichern
+    - Nachreichen-Funktion für nachträgliche Eintragungen
 -->
 <!DOCTYPE html>
 <html lang="de">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Handball Putzplan Generator v2.0</title>
+    <title>Handball Putzplan Generator v2.1</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
@@ -74,11 +79,50 @@
         .balance-good { color: #10b981; }
         .balance-ok { color: #f59e0b; }
         .balance-bad { color: #ef4444; }
+        
+        /* NEU: Editierbare Putzplan-Elemente */
+        .editable-assignment {
+            transition: all 0.2s;
+        }
+        .editable-assignment:hover {
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        }
+        .swap-btn {
+            opacity: 0.6;
+            transition: opacity 0.2s;
+        }
+        .swap-btn:hover {
+            opacity: 1;
+        }
+        .player-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 8px;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            background: #e0e7ff;
+            color: #3730a3;
+            margin: 2px;
+        }
+        .player-chip.pm {
+            background: #fef3c7;
+            color: #92400e;
+            font-weight: 600;
+        }
+        .player-chip .remove-btn {
+            cursor: pointer;
+            margin-left: 2px;
+            opacity: 0.5;
+        }
+        .player-chip .remove-btn:hover {
+            opacity: 1;
+        }
     </style>
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, doc, setDoc, getDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // ==========================================
         // GLOBALE KONFIGURATION
@@ -94,11 +138,17 @@
         
         const PLAYERS_PER_UNIT = 7; // 6 Crew + 1 Putzmaschine
         
+        // GEÄNDERT: Niklas T. → Patrick C.
         const PLAYER_NAMES = [
             "Alex", "Wüpping", "Fabian", "Baumi", "Fred", "Hannes", "Lauryn", "Marius",
-            "Marvin L.", "Matze", "Maurice", "Nico", "Niklas T.", "Niklas M.", "Pascal",
+            "Marvin L.", "Matze", "Maurice", "Nico", "Patrick C.", "Niklas M.", "Pascal",
             "Patrick", "Strooti", "Tim", "Tobi", "Viktor"
         ];
+        
+        // Mapping für Datenmigration
+        const NAME_MIGRATIONS = {
+            "Niklas T.": "Patrick C."
+        };
         
         const APP_ID = typeof __app_id !== 'undefined' ? __app_id : 'handball-putzplan-2025';
         const STATS_COLLECTION = "stats";
@@ -134,7 +184,8 @@
             AppConfig = {
                 nextPutzmaschineType: 'Früh',
                 totalTrainings: 0,
-                dataVersion: '2.0',
+                dataVersion: '2.1',
+                migrationDone: false,
                 ...(docSnap.exists() ? docSnap.data() : {})
             };
         }
@@ -159,20 +210,53 @@
             };
         }
         
-        // Datenmigration von v1.4 auf v2.0
+        // Datenmigration von v1.4 auf v2.0+
         function migratePlayerData(oldData, name) {
             const template = getPlayerStatsTemplate(name);
             const migrated = { ...template, ...oldData };
             
             // Migration: Wenn attendanceCount nicht existiert, berechne es
             if (oldData && typeof oldData.attendanceCount === 'undefined') {
-                // Alte Logik: attendanceCount = totalPutz (Freilose wurden nicht gezählt)
-                // Neue Logik: attendanceCount = totalPutz + freilosCount
                 migrated.attendanceCount = (oldData.totalPutz || 0) + (oldData.freilosCount || 0);
                 console.log(`Migration für ${name}: attendanceCount = ${migrated.attendanceCount}`);
             }
             
+            // Name korrigieren
+            migrated.name = name;
+            
             return migrated;
+        }
+        
+        // NEU: Migration von Niklas T. zu Patrick C.
+        async function migratePlayerNames() {
+            if (AppConfig.migrationDone) return;
+            
+            for (const [oldName, newName] of Object.entries(NAME_MIGRATIONS)) {
+                try {
+                    const oldDocRef = getPlayerDocRef(oldName);
+                    const oldDocSnap = await getDoc(oldDocRef);
+                    
+                    if (oldDocSnap.exists()) {
+                        const oldData = oldDocSnap.data();
+                        console.log(`Migriere ${oldName} → ${newName}:`, oldData);
+                        
+                        // Daten zum neuen Namen kopieren
+                        const newDocRef = getPlayerDocRef(newName);
+                        const newData = { ...oldData, name: newName };
+                        await setDoc(newDocRef, newData, { merge: true });
+                        
+                        // Alten Eintrag löschen
+                        await deleteDoc(oldDocRef);
+                        
+                        console.log(`Migration ${oldName} → ${newName} erfolgreich!`);
+                    }
+                } catch (error) {
+                    console.error(`Fehler bei Migration ${oldName} → ${newName}:`, error);
+                }
+            }
+            
+            // Migration als abgeschlossen markieren
+            await updateConfig({ migrationDone: true, dataVersion: '2.1' });
         }
         
         async function loadAllPlayerStats() {
@@ -223,9 +307,13 @@
                 isAuthReady = true;
 
                 await loadConfig();
+                
+                // NEU: Namens-Migration durchführen
+                await migratePlayerNames();
+                
                 await loadAllPlayerStats();
                 
-                document.getElementById('loading-message').textContent = 'Daten geladen. Version 2.0 mit Fairness-Score aktiv!';
+                document.getElementById('loading-message').textContent = 'Daten geladen. Version 2.1 aktiv!';
                 document.getElementById('loading-container').classList.add('hidden'); 
                 
                 renderPlayerList();
@@ -244,38 +332,25 @@
         /**
          * Berechnet den Fairness-Score für einen Spieler.
          * NIEDRIGER Score = wurde weniger belastet = sollte eher eingeteilt werden
-         * 
-         * @param {object} stats - Spielerstatistiken
-         * @param {string} targetShiftType - 'Früh' oder 'Spät' (für schichtspezifische Optimierung)
-         * @param {boolean} forPutzmaschine - Ob für Putzmaschinen-Auswahl
          */
         function calculateFairnessScore(stats, targetShiftType = null, forPutzmaschine = false) {
             const w = FAIRNESS_WEIGHTS;
             let score = 0;
             
-            // 1. Gesamtdienste (Basis)
             score += stats.totalPutz * w.totalPutz;
-            
-            // 2. Freilos-Ausgleich: Wer VIELE Freilose hat, hat einen NIEDRIGEREN Score
-            //    (soll eher putzen, um Ausgleich zu schaffen)
             score -= stats.freilosCount * w.freilosCount * 0.5;
             
-            // 3. Früh/Spät-Balance
             const fruehSpaetDiff = Math.abs(stats.fruehPutzCount - stats.spaetPutzCount);
             score += fruehSpaetDiff * w.fruehSpaetBalance;
             
-            // 4. Schicht-spezifische Optimierung
             if (targetShiftType === 'Früh') {
-                // Wer WENIGER Früh hat, bekommt niedrigeren Score für Früh
                 score += stats.fruehPutzCount * 0.8;
                 score -= stats.spaetPutzCount * 0.3;
             } else if (targetShiftType === 'Spät') {
-                // Wer WENIGER Spät hat, bekommt niedrigeren Score für Spät
                 score += stats.spaetPutzCount * 0.8;
                 score -= stats.fruehPutzCount * 0.3;
             }
             
-            // 5. Putzmaschinen-spezifisch
             if (forPutzmaschine) {
                 const pmDiff = Math.abs(stats.putzmaschineFruehCount - stats.putzmaschineSpaetCount);
                 score += pmDiff * w.pmFruehSpaetBalance;
@@ -287,7 +362,6 @@
                 }
             }
             
-            // 6. Zeitlicher Abstand (wer lange nicht dran war, hat niedrigeren Score)
             const daysSinceAssigned = stats.lastAssigned > 0 
                 ? (Date.now() - stats.lastAssigned) / (1000 * 60 * 60 * 24)
                 : 999;
@@ -296,9 +370,6 @@
             return score;
         }
         
-        /**
-         * Wählt Spieler basierend auf Multi-Kriterien-Fairness aus
-         */
         function selectByFairness(playerNames, count, targetShiftType = null, forPutzmaschine = false) {
             const playerObjects = playerNames.map(name => {
                 const stats = getPlayerStats(name);
@@ -309,10 +380,8 @@
                 };
             });
             
-            // Sortiere nach Score (niedrigster zuerst = fairste Wahl)
             playerObjects.sort((a, b) => {
                 if (Math.abs(a.score - b.score) < 0.01) {
-                    // Bei gleichem Score: wer länger nicht dran war
                     return a.stats.lastAssigned - b.stats.lastAssigned;
                 }
                 return a.score - b.score;
@@ -321,11 +390,6 @@
             return playerObjects.slice(0, count);
         }
         
-        /**
-         * NEUE GLOBALE Putzmaschinen-Auswahl
-         * Wählt die fairste Putzmaschine aus ALLEN verfügbaren Spielern,
-         * nicht nur aus der bereits gewählten Crew
-         */
         function selectPutzmaschineGlobal(availablePlayers, shiftType, excludeNames = []) {
             const candidates = availablePlayers.filter(name => !excludeNames.includes(name));
             const selected = selectByFairness(candidates, 1, shiftType, true);
@@ -358,7 +422,7 @@
                     <span>KW: <span class="font-bold">${kw}</span> (${isEven ? 'Gerade' : 'Ungerade'})</span>
                     <span>Donnerstag: <span class="font-bold">${donnerstagSchicht}</span></span>
                     <span>Trainings: <span class="font-bold">${totalTrainings}</span></span>
-                    <span class="text-indigo-700 font-semibold">v2.0 Fairness-Score aktiv</span>
+                    <span class="text-indigo-700 font-semibold">v2.1</span>
                 </div>
             `;
         }
@@ -371,17 +435,13 @@
             const listElement = document.getElementById('player-list');
             listElement.innerHTML = '';
             
-            // Keine automatische Auswahl - Spieler starten mit Haken AUS
-            
             const totalTrainings = AppConfig.totalTrainings || 0;
             
             const sortedPlayers = PLAYER_NAMES.map(name => {
                 const stats = getPlayerStats(name);
-                // NEU: Anwesenheitsquote basiert auf attendanceCount
                 const attendanceRate = totalTrainings > 0 
                     ? (stats.attendanceCount / totalTrainings) * 100 
                     : 0;
-                // Balance-Indikator
                 const fruehSpaetDiff = stats.fruehPutzCount - stats.spaetPutzCount;
                 return { 
                     ...stats, 
@@ -393,7 +453,6 @@
             sortedPlayers.forEach(player => {
                 const isSelected = selectedPlayers.has(player.name);
                 
-                // Balance-Farbe
                 let balanceClass = 'balance-good';
                 let balanceText = '⚖️';
                 if (Math.abs(player.fruehSpaetDiff) >= 3) {
@@ -468,48 +527,76 @@
             document.getElementById('whatsapp-copy-container').classList.add('hidden');
         }
 
-        function renderPutzplan(container, cache) {
+        // ==========================================
+        // NEU: EDITIERBARER PUTZPLAN
+        // ==========================================
+        
+        function renderEditablePutzplan(container, cache) {
             let html = '<div class="space-y-4">';
-            let whatsappText = 'Putzplan - ' + new Date().toLocaleDateString('de-DE') + '\n\n';
             
-            cache.assignments.forEach(assignment => {
+            // Info-Hinweis
+            html += `
+                <div class="p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-800">
+                    <strong>💡 Tipp:</strong> Klicke auf einen Spieler, um ihn zu ändern oder als Putzmaschine zu setzen.
+                </div>
+            `;
+            
+            cache.assignments.forEach((assignment, shiftIndex) => {
                 const bgClass = assignment.shiftType === 'Früh' ? 'bg-blue-50' : 'bg-green-50';
                 const pmStats = getPlayerStats(assignment.putzmaschine);
                 const pmTotal = pmStats.putzmaschineFruehCount + pmStats.putzmaschineSpaetCount;
                 
                 html += `
-                    <div class="p-4 rounded-xl shadow-md ${bgClass}">
-                        <h3 class="text-lg font-bold text-gray-800 border-b pb-2 mb-2">
+                    <div class="p-4 rounded-xl shadow-md ${bgClass} editable-assignment" data-shift="${shiftIndex}">
+                        <h3 class="text-lg font-bold text-gray-800 border-b pb-2 mb-3">
                             ${assignment.shiftName} 
                             <span class="text-sm font-normal text-gray-600">(${assignment.players.length + 1} Spieler)</span>
                         </h3>
-                        <div class="mb-2">
+                        
+                        <div class="mb-3">
                             <span class="font-semibold text-indigo-700">Putzmaschine:</span>
-                            <span class="text-indigo-900 font-bold">${assignment.putzmaschine}</span>
-                            <span class="text-xs text-gray-500 ml-2">(bisher ${pmTotal}x PM)</span>
+                            <span class="player-chip pm" onclick="window.openPlayerSwapModal(${shiftIndex}, 'pm', '${assignment.putzmaschine}')">
+                                ${assignment.putzmaschine}
+                                <span class="text-xs opacity-60">(${pmTotal}x PM)</span>
+                                <span class="remove-btn">✏️</span>
+                            </span>
                         </div>
+                        
                         <div class="text-gray-700 text-sm">
-                            <span class="font-medium">Crew:</span> ${assignment.players.join(', ')}
+                            <span class="font-medium">Crew:</span>
+                            <div class="mt-1 flex flex-wrap">
+                                ${assignment.players.map((player, playerIndex) => `
+                                    <span class="player-chip" onclick="window.openPlayerSwapModal(${shiftIndex}, ${playerIndex}, '${player}')">
+                                        ${player}
+                                        <span class="remove-btn">✏️</span>
+                                    </span>
+                                `).join('')}
+                                <button onclick="window.addPlayerToShift(${shiftIndex})" class="player-chip bg-gray-200 text-gray-600 hover:bg-gray-300">
+                                    + Hinzufügen
+                                </button>
+                            </div>
                         </div>
                     </div>
                 `;
-
-                whatsappText += `*${assignment.shiftName}*\n`;
-                whatsappText += `Maschine: ${assignment.putzmaschine}\n`;
-                whatsappText += `Crew: ${assignment.players.join(', ')}\n\n`;
             });
             
+            // Freilos-Bereich
             if (cache.freilos.players.length > 0) {
                 html += `
                     <div class="p-4 rounded-xl shadow-md bg-yellow-50">
                         <h3 class="text-lg font-bold text-gray-800 border-b pb-2 mb-2">
                             🎫 Freilos <span class="text-sm font-normal">(${cache.freilos.count} Spieler)</span>
                         </h3>
-                        <p class="text-gray-700 text-sm">${cache.freilos.players.join(', ')}</p>
-                        <p class="text-xs text-gray-500 mt-1">Diese Spieler waren anwesend, müssen aber nicht putzen.</p>
+                        <div class="flex flex-wrap">
+                            ${cache.freilos.players.map(player => `
+                                <span class="player-chip bg-yellow-100 text-yellow-800">
+                                    ${player}
+                                </span>
+                            `).join('')}
+                        </div>
+                        <p class="text-xs text-gray-500 mt-2">Diese Spieler waren anwesend, müssen aber nicht putzen.</p>
                     </div>
                 `;
-                whatsappText += `*Freilos:*\n${cache.freilos.players.join(', ')}\n`;
             }
             
             html += `
@@ -525,11 +612,206 @@
             `;
             container.innerHTML = html;
             
-            renderWhatsappExport(whatsappText);
+            renderWhatsappExport(generateWhatsappText(cache));
+        }
+        
+        function generateWhatsappText(cache) {
+            let whatsappText = 'Putzplan - ' + new Date().toLocaleDateString('de-DE') + '\n\n';
+            
+            cache.assignments.forEach(assignment => {
+                whatsappText += `*${assignment.shiftName}*\n`;
+                whatsappText += `Maschine: ${assignment.putzmaschine}\n`;
+                whatsappText += `Crew: ${assignment.players.join(', ')}\n\n`;
+            });
+            
+            if (cache.freilos.players.length > 0) {
+                whatsappText += `*Freilos:*\n${cache.freilos.players.join(', ')}\n`;
+            }
+            
+            return whatsappText;
+        }
+        
+        // Modal für Spieler-Austausch
+        window.openPlayerSwapModal = function(shiftIndex, playerIndex, currentPlayer) {
+            const modal = document.getElementById('swap-modal');
+            const content = document.getElementById('swap-modal-content');
+            
+            const assignment = assignmentCache.assignments[shiftIndex];
+            const isPM = playerIndex === 'pm';
+            
+            // Alle verfügbaren Spieler (die nicht schon in dieser Schicht sind)
+            const usedInShift = [assignment.putzmaschine, ...assignment.players];
+            const availablePlayers = assignmentCache.allPresentPlayers.filter(p => !usedInShift.includes(p) || p === currentPlayer);
+            
+            // Freilos-Spieler auch anzeigen
+            const freilosPlayers = assignmentCache.freilos.players;
+            
+            content.innerHTML = `
+                <h2 class="text-xl font-bold text-gray-800 mb-4 border-b pb-2">
+                    ${isPM ? '🔧 Putzmaschine' : '👤 Crew-Mitglied'} ändern
+                </h2>
+                <p class="text-sm text-gray-600 mb-4">
+                    Aktuell: <strong>${currentPlayer}</strong>
+                </p>
+                
+                <div class="space-y-2 max-h-60 overflow-y-auto">
+                    <p class="text-xs font-semibold text-gray-500 uppercase">Aus Putzdienst:</p>
+                    ${availablePlayers.filter(p => p !== currentPlayer).map(player => {
+                        const stats = getPlayerStats(player);
+                        const pmCount = stats.putzmaschineFruehCount + stats.putzmaschineSpaetCount;
+                        return `
+                            <button onclick="window.swapPlayer(${shiftIndex}, '${playerIndex}', '${currentPlayer}', '${player}')" 
+                                class="w-full text-left p-2 rounded-lg hover:bg-indigo-50 border border-gray-200 flex justify-between items-center">
+                                <span>${player}</span>
+                                <span class="text-xs text-gray-500">🧹${stats.totalPutz} | PM:${pmCount}</span>
+                            </button>
+                        `;
+                    }).join('') || '<p class="text-gray-400 text-sm">Keine weiteren Spieler</p>'}
+                    
+                    ${freilosPlayers.length > 0 ? `
+                        <p class="text-xs font-semibold text-gray-500 uppercase mt-4">Aus Freilos:</p>
+                        ${freilosPlayers.map(player => {
+                            const stats = getPlayerStats(player);
+                            const pmCount = stats.putzmaschineFruehCount + stats.putzmaschineSpaetCount;
+                            return `
+                                <button onclick="window.swapPlayerFromFreilos(${shiftIndex}, '${playerIndex}', '${currentPlayer}', '${player}')" 
+                                    class="w-full text-left p-2 rounded-lg hover:bg-yellow-50 border border-yellow-200 flex justify-between items-center">
+                                    <span>${player} <span class="text-yellow-600 text-xs">(Freilos)</span></span>
+                                    <span class="text-xs text-gray-500">🧹${stats.totalPutz} | PM:${pmCount}</span>
+                                </button>
+                            `;
+                        }).join('')}
+                    ` : ''}
+                </div>
+                
+                <div class="flex justify-between mt-4 pt-4 border-t">
+                    ${!isPM ? `
+                        <button onclick="window.removePlayerFromShift(${shiftIndex}, ${playerIndex}, '${currentPlayer}')" 
+                            class="text-red-600 hover:text-red-800 text-sm">
+                            🗑️ Entfernen
+                        </button>
+                    ` : '<div></div>'}
+                    <button onclick="document.getElementById('swap-modal').classList.add('hidden')" 
+                        class="bg-gray-300 hover:bg-gray-400 text-gray-800 font-bold py-2 px-4 rounded">
+                        Abbrechen
+                    </button>
+                </div>
+            `;
+            modal.classList.remove('hidden');
+        }
+        
+        window.swapPlayer = function(shiftIndex, playerIndex, oldPlayer, newPlayer) {
+            const assignment = assignmentCache.assignments[shiftIndex];
+            
+            if (playerIndex === 'pm') {
+                // PM tauschen
+                const oldPM = assignment.putzmaschine;
+                assignment.putzmaschine = newPlayer;
+                
+                // Alten PM in die Crew verschieben (falls er anwesend war)
+                if (!assignment.players.includes(oldPM)) {
+                    assignment.players.push(oldPM);
+                }
+                // Neuen PM aus der Crew entfernen
+                assignment.players = assignment.players.filter(p => p !== newPlayer);
+            } else {
+                // Crew-Mitglied tauschen
+                assignment.players[playerIndex] = newPlayer;
+            }
+            
+            document.getElementById('swap-modal').classList.add('hidden');
+            renderEditablePutzplan(document.getElementById('putzplan-result'), assignmentCache);
+        }
+        
+        window.swapPlayerFromFreilos = function(shiftIndex, playerIndex, oldPlayer, newPlayer) {
+            const assignment = assignmentCache.assignments[shiftIndex];
+            
+            // Spieler aus Freilos entfernen
+            assignmentCache.freilos.players = assignmentCache.freilos.players.filter(p => p !== newPlayer);
+            assignmentCache.freilos.count = assignmentCache.freilos.players.length;
+            
+            if (playerIndex === 'pm') {
+                // Alten PM zu Freilos
+                assignmentCache.freilos.players.push(assignment.putzmaschine);
+                assignmentCache.freilos.count++;
+                assignment.putzmaschine = newPlayer;
+            } else {
+                // Alten Spieler zu Freilos
+                assignmentCache.freilos.players.push(oldPlayer);
+                assignmentCache.freilos.count++;
+                assignment.players[playerIndex] = newPlayer;
+            }
+            
+            document.getElementById('swap-modal').classList.add('hidden');
+            renderEditablePutzplan(document.getElementById('putzplan-result'), assignmentCache);
+        }
+        
+        window.removePlayerFromShift = function(shiftIndex, playerIndex, playerName) {
+            const assignment = assignmentCache.assignments[shiftIndex];
+            
+            // Spieler aus Crew entfernen
+            assignment.players.splice(playerIndex, 1);
+            
+            // Zu Freilos hinzufügen
+            assignmentCache.freilos.players.push(playerName);
+            assignmentCache.freilos.count++;
+            
+            document.getElementById('swap-modal').classList.add('hidden');
+            renderEditablePutzplan(document.getElementById('putzplan-result'), assignmentCache);
+        }
+        
+        window.addPlayerToShift = function(shiftIndex) {
+            const assignment = assignmentCache.assignments[shiftIndex];
+            const modal = document.getElementById('swap-modal');
+            const content = document.getElementById('swap-modal-content');
+            
+            // Verfügbare Spieler aus Freilos
+            const freilosPlayers = assignmentCache.freilos.players;
+            
+            content.innerHTML = `
+                <h2 class="text-xl font-bold text-gray-800 mb-4 border-b pb-2">
+                    ➕ Spieler zur ${assignment.shiftName} hinzufügen
+                </h2>
+                
+                <div class="space-y-2 max-h-60 overflow-y-auto">
+                    ${freilosPlayers.length > 0 ? freilosPlayers.map(player => {
+                        const stats = getPlayerStats(player);
+                        return `
+                            <button onclick="window.addFromFreilos(${shiftIndex}, '${player}')" 
+                                class="w-full text-left p-2 rounded-lg hover:bg-indigo-50 border border-gray-200 flex justify-between items-center">
+                                <span>${player}</span>
+                                <span class="text-xs text-gray-500">🧹${stats.totalPutz}</span>
+                            </button>
+                        `;
+                    }).join('') : '<p class="text-gray-400 text-sm">Keine Freilos-Spieler verfügbar</p>'}
+                </div>
+                
+                <div class="flex justify-end mt-4 pt-4 border-t">
+                    <button onclick="document.getElementById('swap-modal').classList.add('hidden')" 
+                        class="bg-gray-300 hover:bg-gray-400 text-gray-800 font-bold py-2 px-4 rounded">
+                        Abbrechen
+                    </button>
+                </div>
+            `;
+            modal.classList.remove('hidden');
+        }
+        
+        window.addFromFreilos = function(shiftIndex, playerName) {
+            const assignment = assignmentCache.assignments[shiftIndex];
+            
+            // Aus Freilos entfernen
+            assignmentCache.freilos.players = assignmentCache.freilos.players.filter(p => p !== playerName);
+            assignmentCache.freilos.count--;
+            
+            // Zur Crew hinzufügen
+            assignment.players.push(playerName);
+            
+            document.getElementById('swap-modal').classList.add('hidden');
+            renderEditablePutzplan(document.getElementById('putzplan-result'), assignmentCache);
         }
         
         // ==========================================
-        // PUTZPLAN GENERIERUNG (NEUE LOGIK!)
+        // PUTZPLAN GENERIERUNG
         // ==========================================
 
         window.generatePutzplan = function() {
@@ -551,13 +833,9 @@
                 let freilosNames = [];
                 
                 if (variant === '1') {
-                    // ==============================
-                    // VARIANTE 1: Eine Schicht
-                    // ==============================
                     const shiftType = AppConfig.nextPutzmaschineType || 'Früh';
                     const playersNeeded = Math.min(availablePlayers.length, PLAYERS_PER_UNIT);
                     
-                    // 1. Wähle Putzmaschine GLOBAL (nicht aus Crew!)
                     const pmSelection = selectPutzmaschineGlobal(availablePlayers, shiftType);
                     if (!pmSelection) {
                         renderMessage(resultDiv, 'Fehler', 'Keine Spieler verfügbar.', 'bg-red-100 text-red-800');
@@ -565,13 +843,11 @@
                     }
                     const putzmaschine = pmSelection.name;
                     
-                    // 2. Wähle Crew (ohne PM) mit Schicht-Optimierung
                     const remainingPlayers = availablePlayers.filter(n => n !== putzmaschine);
                     const crewNeeded = playersNeeded - 1;
                     const crewSelection = selectByFairness(remainingPlayers, crewNeeded, shiftType, false);
                     const crewNames = crewSelection.map(p => p.name);
                     
-                    // 3. Rest bekommt Freilos
                     const allAssigned = [putzmaschine, ...crewNames];
                     freilosNames = availablePlayers.filter(n => !allAssigned.includes(n));
                     
@@ -586,13 +862,10 @@
                         assignments,
                         freilos: { players: freilosNames, count: freilosNames.length },
                         nextPutzmaschineType: shiftType === 'Früh' ? 'Spät' : 'Früh',
-                        allPresentPlayers: availablePlayers // NEU: Alle Anwesenden speichern
+                        allPresentPlayers: availablePlayers
                     };
 
                 } else if (variant === '2') {
-                    // ==============================
-                    // VARIANTE 2: Zwei Schichten
-                    // ==============================
                     const totalNeeded = 2 * PLAYERS_PER_UNIT;
                     
                     if (availablePlayers.length < 2) {
@@ -603,31 +876,25 @@
                     
                     const playersToAssign = Math.min(availablePlayers.length, totalNeeded);
                     
-                    // Berechne Verteilung
                     const sizePerShift = Math.floor(playersToAssign / 2);
                     const remainder = playersToAssign % 2;
                     const shift1Size = sizePerShift + remainder;
                     const shift2Size = sizePerShift;
                     
-                    // 1. Putzmaschinen GLOBAL auswählen
                     const pm1Selection = selectPutzmaschineGlobal(availablePlayers, 'Früh');
                     const pm1 = pm1Selection ? pm1Selection.name : availablePlayers[0];
                     
                     const pm2Selection = selectPutzmaschineGlobal(availablePlayers, 'Spät', [pm1]);
                     const pm2 = pm2Selection ? pm2Selection.name : availablePlayers.find(n => n !== pm1);
                     
-                    // 2. Restliche Spieler auf Schichten verteilen
                     const remainingPlayers = availablePlayers.filter(n => n !== pm1 && n !== pm2);
                     
-                    // Früh-Crew auswählen (optimiert für Früh)
                     const crew1Needed = shift1Size - 1;
                     const crew1Selection = selectByFairness(remainingPlayers, crew1Needed, 'Früh', false);
                     const crew1Names = crew1Selection.map(p => p.name);
                     
-                    // Spät-Crew = Rest
                     const crew2Names = remainingPlayers.filter(n => !crew1Names.includes(n)).slice(0, shift2Size - 1);
                     
-                    // Freilose
                     const allAssigned = [pm1, pm2, ...crew1Names, ...crew2Names];
                     freilosNames = availablePlayers.filter(n => !allAssigned.includes(n));
                     
@@ -655,7 +922,8 @@
                     };
                 }
                 
-                renderPutzplan(resultDiv, assignmentCache);
+                // NEU: Editierbaren Putzplan rendern
+                renderEditablePutzplan(resultDiv, assignmentCache);
 
             } catch (error) {
                 console.error("KRITISCHER FEHLER:", error);
@@ -665,7 +933,7 @@
         }
 
         // ==========================================
-        // SPEICHERN (NEU: mit attendanceCount!)
+        // SPEICHERN
         // ==========================================
 
         window.saveAssignment = async function() {
@@ -685,7 +953,6 @@
 
             const promises = [];
             
-            // 1. Alle Putzdienst-Zuweisungen speichern
             assignmentCache.assignments.forEach(assignment => {
                 const shiftKey = assignment.shiftType === 'Früh' ? 'fruehPutzCount' : 'spaetPutzCount';
                 const pmKey = assignment.shiftType === 'Früh' ? 'putzmaschineFruehCount' : 'putzmaschineSpaetCount';
@@ -698,7 +965,7 @@
                     
                     const updates = {
                         totalPutz: (stats.totalPutz || 0) + 1,
-                        attendanceCount: (stats.attendanceCount || 0) + 1, // NEU!
+                        attendanceCount: (stats.attendanceCount || 0) + 1,
                         lastAssigned: now,
                         [shiftKey]: (stats[shiftKey] || 0) + 1
                     };
@@ -706,18 +973,16 @@
                         updates[pmKey] = (stats[pmKey] || 0) + 1;
                     }
                     
-                    // Lokalen Cache aktualisieren
                     playerStats[name] = { ...stats, ...updates };
                     promises.push(setDoc(getPlayerDocRef(name), updates, { merge: true }));
                 });
             });
 
-            // 2. Freilose speichern (NEU: auch attendanceCount erhöhen!)
             assignmentCache.freilos.players.forEach(name => {
                 const stats = getPlayerStats(name);
                 const updates = {
                     freilosCount: (stats.freilosCount || 0) + 1,
-                    attendanceCount: (stats.attendanceCount || 0) + 1, // NEU: Anwesenheit zählt!
+                    attendanceCount: (stats.attendanceCount || 0) + 1,
                     lastAssigned: now
                 };
                 
@@ -734,9 +999,6 @@
                             ${assignmentCache.assignments.reduce((sum, a) => sum + a.players.length + 1, 0)} Putzdienste und 
                             ${assignmentCache.freilos.count} Freilose wurden korrekt gezählt.
                         </p>
-                        <p class="text-xs mt-2 text-green-700">
-                            Alle ${assignmentCache.allPresentPlayers?.length || '?'} anwesenden Spieler wurden für die Anwesenheitsstatistik erfasst.
-                        </p>
                     </div>
                 `;
                 assignmentCache = null;
@@ -750,7 +1012,163 @@
         }
         
         // ==========================================
-        // CSV EXPORT (erweitert)
+        // NEU: NACHREICHEN-FUNKTION
+        // ==========================================
+        
+        window.toggleNachreichenModal = function() {
+            const modal = document.getElementById('nachreichen-modal');
+            modal.classList.toggle('hidden');
+            
+            if (!modal.classList.contains('hidden')) {
+                renderNachreichenForm();
+            }
+        }
+        
+        function renderNachreichenForm() {
+            const content = document.getElementById('nachreichen-content');
+            
+            content.innerHTML = `
+                <div class="space-y-4">
+                    <div class="p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-800">
+                        <strong>ℹ️ Info:</strong> Hier kannst du einen Putzdienst nachträglich eintragen, 
+                        z.B. wenn die Teams sich selbst gebildet haben.
+                    </div>
+                    
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Schichttyp</label>
+                        <select id="nachreichen-shift" class="w-full p-2 border rounded-lg">
+                            <option value="Früh">Früh</option>
+                            <option value="Spät">Spät</option>
+                        </select>
+                    </div>
+                    
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Putzmaschine</label>
+                        <select id="nachreichen-pm" class="w-full p-2 border rounded-lg">
+                            <option value="">-- Bitte wählen --</option>
+                            ${PLAYER_NAMES.map(name => `<option value="${name}">${name}</option>`).join('')}
+                        </select>
+                    </div>
+                    
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Crew (mehrere auswählen)</label>
+                        <div class="max-h-40 overflow-y-auto border rounded-lg p-2 space-y-1">
+                            ${PLAYER_NAMES.map(name => `
+                                <label class="flex items-center gap-2 p-1 hover:bg-gray-50 rounded cursor-pointer">
+                                    <input type="checkbox" class="nachreichen-crew" value="${name}">
+                                    <span>${name}</span>
+                                </label>
+                            `).join('')}
+                        </div>
+                    </div>
+                    
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Freilose (optional)</label>
+                        <div class="max-h-32 overflow-y-auto border rounded-lg p-2 space-y-1">
+                            ${PLAYER_NAMES.map(name => `
+                                <label class="flex items-center gap-2 p-1 hover:bg-gray-50 rounded cursor-pointer">
+                                    <input type="checkbox" class="nachreichen-freilos" value="${name}">
+                                    <span>${name}</span>
+                                </label>
+                            `).join('')}
+                        </div>
+                    </div>
+                    
+                    <div class="flex items-center gap-2">
+                        <input type="checkbox" id="nachreichen-count-training" checked>
+                        <label for="nachreichen-count-training" class="text-sm text-gray-700">
+                            Als Training zählen (+1 zu Gesamtzahl)
+                        </label>
+                    </div>
+                </div>
+            `;
+        }
+        
+        window.saveNachreichen = async function() {
+            const shiftType = document.getElementById('nachreichen-shift').value;
+            const pm = document.getElementById('nachreichen-pm').value;
+            const crewCheckboxes = document.querySelectorAll('.nachreichen-crew:checked');
+            const freilosCheckboxes = document.querySelectorAll('.nachreichen-freilos:checked');
+            const countAsTraining = document.getElementById('nachreichen-count-training').checked;
+            
+            if (!pm) {
+                alert('Bitte Putzmaschine auswählen!');
+                return;
+            }
+            
+            const crew = Array.from(crewCheckboxes).map(cb => cb.value).filter(n => n !== pm);
+            const freilos = Array.from(freilosCheckboxes).map(cb => cb.value).filter(n => n !== pm && !crew.includes(n));
+            
+            if (crew.length === 0) {
+                alert('Bitte mindestens ein Crew-Mitglied auswählen!');
+                return;
+            }
+            
+            const now = Date.now();
+            const shiftKey = shiftType === 'Früh' ? 'fruehPutzCount' : 'spaetPutzCount';
+            const pmKey = shiftType === 'Früh' ? 'putzmaschineFruehCount' : 'putzmaschineSpaetCount';
+            
+            const promises = [];
+            
+            // Training zählen
+            if (countAsTraining) {
+                AppConfig.totalTrainings += 1;
+                promises.push(updateConfig({ totalTrainings: AppConfig.totalTrainings }));
+            }
+            
+            // Putzmaschine speichern
+            const pmStats = getPlayerStats(pm);
+            const pmUpdates = {
+                totalPutz: (pmStats.totalPutz || 0) + 1,
+                attendanceCount: (pmStats.attendanceCount || 0) + 1,
+                lastAssigned: now,
+                [shiftKey]: (pmStats[shiftKey] || 0) + 1,
+                [pmKey]: (pmStats[pmKey] || 0) + 1
+            };
+            playerStats[pm] = { ...pmStats, ...pmUpdates };
+            promises.push(setDoc(getPlayerDocRef(pm), pmUpdates, { merge: true }));
+            
+            // Crew speichern
+            crew.forEach(name => {
+                const stats = getPlayerStats(name);
+                const updates = {
+                    totalPutz: (stats.totalPutz || 0) + 1,
+                    attendanceCount: (stats.attendanceCount || 0) + 1,
+                    lastAssigned: now,
+                    [shiftKey]: (stats[shiftKey] || 0) + 1
+                };
+                playerStats[name] = { ...stats, ...updates };
+                promises.push(setDoc(getPlayerDocRef(name), updates, { merge: true }));
+            });
+            
+            // Freilose speichern
+            freilos.forEach(name => {
+                const stats = getPlayerStats(name);
+                const updates = {
+                    freilosCount: (stats.freilosCount || 0) + 1,
+                    attendanceCount: (stats.attendanceCount || 0) + 1,
+                    lastAssigned: now
+                };
+                playerStats[name] = { ...stats, ...updates };
+                promises.push(setDoc(getPlayerDocRef(name), updates, { merge: true }));
+            });
+            
+            try {
+                await Promise.all(promises);
+                
+                alert(`✅ Nachgereicht!\n\nPutzmaschine: ${pm}\nCrew: ${crew.join(', ')}\nFreilose: ${freilos.length > 0 ? freilos.join(', ') : 'keine'}`);
+                
+                window.toggleNachreichenModal();
+                renderPlayerList();
+                updateShiftInfo();
+            } catch (e) {
+                console.error("Fehler beim Nachreichen:", e);
+                alert("Fehler beim Speichern!");
+            }
+        }
+        
+        // ==========================================
+        // CSV EXPORT
         // ==========================================
         
         window.exportStatsToCSV = function() {
@@ -784,7 +1202,7 @@
             
             const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
             const url = URL.createObjectURL(blob);
-            const filename = `Handball_Putzplan_v2_${new Date().toISOString().slice(0, 10)}.csv`;
+            const filename = `Handball_Putzplan_v2.1_${new Date().toISOString().slice(0, 10)}.csv`;
             
             const link = document.createElement('a');
             link.href = url;
@@ -830,7 +1248,6 @@
             const fruehSpaetDiff = stats.fruehPutzCount - stats.spaetPutzCount;
             const pmDiff = stats.putzmaschineFruehCount - stats.putzmaschineSpaetCount;
             
-            // Fairness-Score berechnen
             const fairnessScore = calculateFairnessScore(stats).toFixed(2);
             
             const modal = document.getElementById('details-modal');
@@ -1149,6 +1566,9 @@
             <button onclick="window.toggleStatsModal()" class="text-indigo-600 hover:text-indigo-800 font-medium text-sm p-2 rounded-lg bg-white shadow-md">
                 📊 Statistiken
             </button>
+            <button onclick="window.toggleNachreichenModal()" class="text-orange-600 hover:text-orange-800 font-medium text-sm p-2 rounded-lg bg-white shadow-md border border-orange-300">
+                📝 Nachreichen
+            </button>
             <button onclick="window.exportStatsToCSV()" class="text-green-700 hover:text-green-900 font-medium text-sm p-2 rounded-lg bg-white shadow-md border border-green-300">
                 📥 CSV Export
             </button>
@@ -1179,6 +1599,35 @@
             <div id="details-modal-content"></div>
         </div>
     </div>
+    
+    <!-- Player Swap Modal (NEU) -->
+    <div id="swap-modal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-75 z-50 overflow-y-auto modal-container">
+        <div class="container-card w-full max-w-md p-6 relative">
+            <button onclick="document.getElementById('swap-modal').classList.add('hidden')" class="absolute top-4 right-4 text-gray-500 hover:text-gray-800">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+            </button>
+            <div id="swap-modal-content"></div>
+        </div>
+    </div>
+    
+    <!-- Nachreichen Modal (NEU) -->
+    <div id="nachreichen-modal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-75 z-50 overflow-y-auto modal-container">
+        <div class="container-card w-full max-w-lg p-6 relative modal-scrollable-content">
+            <h2 class="text-2xl font-bold text-gray-800 mb-4 border-b pb-2">📝 Putzdienst Nachreichen</h2>
+            <button onclick="window.toggleNachreichenModal()" class="absolute top-4 right-4 text-gray-500 hover:text-gray-800">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+            </button>
+            <div id="nachreichen-content"></div>
+            <div class="flex justify-end gap-2 mt-4 pt-4 border-t">
+                <button onclick="window.toggleNachreichenModal()" class="bg-gray-300 hover:bg-gray-400 text-gray-800 font-bold py-2 px-4 rounded">
+                    Abbrechen
+                </button>
+                <button onclick="window.saveNachreichen()" class="bg-orange-600 hover:bg-orange-700 text-white font-bold py-2 px-4 rounded">
+                    💾 Nachreichen speichern
+                </button>
+            </div>
+        </div>
+    </div>
 
     <!-- Reset Modal -->
     <div id="reset-modal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-75 z-50 flex items-center justify-center p-4">
@@ -1193,7 +1642,7 @@
     </div>
     
     <footer class="text-center text-gray-400 text-xs mt-8">
-        v2.0 | Multi-Kriterien Fairness-Score | Cloud Sync
+        v2.1 | Multi-Kriterien Fairness-Score | Cloud Sync | Editierbar & Nachreichen
     </footer>
 </body>
 </html>
